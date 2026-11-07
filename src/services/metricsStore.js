@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { writeJsonAtomic, readMetadata } = require('../storage/metadataStore');
+const { metricsPath } = require('../storage/paths');
 const {
   nowMonotonicMs,
   mergeActiveIntervals,
@@ -38,9 +39,9 @@ const {
 
 const DEFINITIONS = Object.freeze({
   activeMs:
-    'Total milliseconds server was actively processing chunks, merging overlapping chunks and idle gaps < 1000ms',
+    'Total milliseconds server was actively processing chunks, merging overlapping chunks and idle gaps < 1000ms (merged gaps < 1000ms count as active)',
   wallMs:
-    'Wall-clock milliseconds from first chunk attempt to last chunk commit (includes idle time between chunks)',
+    'Wall-clock milliseconds from start of first chunk attempt to end of last chunk commit (lastEndMs - firstStartMs)',
   resendEfficiency:
     'Ratio of resent chunk bytes (duplicates + repairs) to expected file size; lower is better (0 is optimal)',
   throughput:
@@ -112,6 +113,8 @@ function createMetricsStore({ storageRoot, config }) {
       mergedIntervals: [],
       recentRecords: [],
       chunkDurationsMs: [],
+      firstStartMs: null,
+      lastEndMs: null,
       firstAttemptAt: null,
       lastCommitAt: null,
       finalize: null,
@@ -157,7 +160,7 @@ function createMetricsStore({ storageRoot, config }) {
         throw new Error('Injected metrics persistence failure');
       }
 
-      const filePath = path.join(storageRoot, 'uploads', uploadId, 'metrics.json');
+      const filePath = metricsPath(uploadId, storageRoot);
       const payload = {
         uploadId: entry.uploadId,
         counters: { ...entry.counters },
@@ -166,6 +169,8 @@ function createMetricsStore({ storageRoot, config }) {
         mergedIntervals: [...entry.mergedIntervals],
         recentRecords: [...entry.recentRecords],
         chunkDurationsMs: [...entry.chunkDurationsMs],
+        firstStartMs: entry.firstStartMs,
+        lastEndMs: entry.lastEndMs,
         firstAttemptAt: entry.firstAttemptAt,
         lastCommitAt: entry.lastCommitAt,
         finalize: entry.finalize ? { ...entry.finalize } : null,
@@ -201,8 +206,11 @@ function createMetricsStore({ storageRoot, config }) {
     entry.perIndexAttempts[numIndex] = (entry.perIndexAttempts[numIndex] || 0) + 1;
     entry.bytes.declaredOnAttempts += declaredBytes;
 
-    if (!entry.firstAttemptAt) {
-      entry.firstAttemptAt = new Date().toISOString();
+    if (entry.firstStartMs === null || startMs < entry.firstStartMs) {
+      entry.firstStartMs = startMs;
+      const nowMs = nowMonotonicMs();
+      const offsetMs = Math.max(0, nowMs - startMs);
+      entry.firstAttemptAt = new Date(Date.now() - offsetMs).toISOString();
     }
 
     const durationMs = Math.max(0, endMs - startMs);
@@ -211,7 +219,12 @@ function createMetricsStore({ storageRoot, config }) {
       case 'committed': {
         entry.counters.committed++;
         entry.bytes.committed += declaredBytes;
-        entry.lastCommitAt = new Date().toISOString();
+        if (entry.lastEndMs === null || endMs > entry.lastEndMs) {
+          entry.lastEndMs = endMs;
+          const nowMs = nowMonotonicMs();
+          const offsetMs = Math.max(0, nowMs - endMs);
+          entry.lastCommitAt = new Date(Date.now() - offsetMs).toISOString();
+        }
 
         entry.chunkDurationsMs.push(durationMs);
         if (entry.chunkDurationsMs.length > 2048) {
@@ -239,7 +252,12 @@ function createMetricsStore({ storageRoot, config }) {
       case 'repaired': {
         entry.counters.repaired++;
         entry.bytes.resent += declaredBytes;
-        entry.lastCommitAt = new Date().toISOString();
+        if (entry.lastEndMs === null || endMs > entry.lastEndMs) {
+          entry.lastEndMs = endMs;
+          const nowMs = nowMonotonicMs();
+          const offsetMs = Math.max(0, nowMs - endMs);
+          entry.lastCommitAt = new Date(Date.now() - offsetMs).toISOString();
+        }
 
         entry.chunkDurationsMs.push(durationMs);
         if (entry.chunkDurationsMs.length > 2048) {
@@ -388,9 +406,9 @@ function createMetricsStore({ storageRoot, config }) {
   }
 
   async function loadPersistedEntry(uploadId) {
-    const metricsPath = path.join(storageRoot, 'uploads', uploadId, 'metrics.json');
+    const metricsFilePath = metricsPath(uploadId, storageRoot);
     try {
-      const raw = await fs.promises.readFile(metricsPath, 'utf8');
+      const raw = await fs.promises.readFile(metricsFilePath, 'utf8');
       const loaded = JSON.parse(raw);
       if (loaded && loaded.uploadId === uploadId) {
         const entry = {
@@ -401,6 +419,8 @@ function createMetricsStore({ storageRoot, config }) {
           mergedIntervals: Array.isArray(loaded.mergedIntervals) ? loaded.mergedIntervals : [],
           recentRecords: Array.isArray(loaded.recentRecords) ? loaded.recentRecords : [],
           chunkDurationsMs: Array.isArray(loaded.chunkDurationsMs) ? loaded.chunkDurationsMs : [],
+          firstStartMs: typeof loaded.firstStartMs === 'number' ? loaded.firstStartMs : null,
+          lastEndMs: typeof loaded.lastEndMs === 'number' ? loaded.lastEndMs : null,
           firstAttemptAt: loaded.firstAttemptAt || null,
           lastCommitAt: loaded.lastCommitAt || null,
           finalize: loaded.finalize || null,
@@ -525,10 +545,12 @@ function createMetricsStore({ storageRoot, config }) {
 
     // Full report
     const activeTimeMs = activeMs(entry.mergedIntervals);
-    const wallMs =
-      entry.firstAttemptAt && entry.lastCommitAt
-        ? Math.max(0, new Date(entry.lastCommitAt).getTime() - new Date(entry.firstAttemptAt).getTime())
-        : 0;
+    let wallMs = 0;
+    if (entry.firstStartMs !== null && entry.lastEndMs !== null) {
+      wallMs = Math.max(0, entry.lastEndMs - entry.firstStartMs);
+    } else if (entry.firstAttemptAt && entry.lastCommitAt) {
+      wallMs = Math.max(0, new Date(entry.lastCommitAt).getTime() - new Date(entry.firstAttemptAt).getTime());
+    }
 
     const overallBps = bytesPerSecond(committedBytes, activeTimeMs);
     const overallMiB = toMiBps(overallBps);

@@ -138,7 +138,7 @@ function registerUploadRoutes(router, { storageRoot, config, metricsStore }) {
 
       sendJson(res, 200, media);
     } catch (err) {
-      if (metricsStore) {
+      if (metricsStore && err.code !== 'UPLOAD_NOT_FOUND' && err.statusCode !== 404) {
         metricsStore.recordFinalizeFailure(uploadId, err.code || 'UNKNOWN');
       }
       throw err;

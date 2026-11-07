@@ -49,6 +49,7 @@ test('pure parseRangeHeader and header helpers unit tests', async (t) => {
 
   await t.test('explicit range "bytes=a-b" where a > b -> kind malformed', () => {
     assert.deepEqual(parseRangeHeader('bytes=5-4', size), { kind: 'malformed' });
+    assert.deepEqual(parseRangeHeader('bytes=500-100', size), { kind: 'malformed' });
     assert.deepEqual(parseRangeHeader('bytes=100-50', size), { kind: 'malformed' });
   });
 

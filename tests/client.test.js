@@ -95,6 +95,8 @@ test('Client concurrency, failure injection, and clientMetrics tests', async (t)
       assert.equal(cm.basis, 'client-observed');
       assert.ok(cm.elapsedMs > 0);
       assert.equal(cm.bytesSentThisRun, fileSize65Mb);
+      assert.ok(typeof cm.clientObservedBytesPerSecond === 'number');
+      assert.ok(cm.clientObservedBytesPerSecond > 0);
       assert.ok(cm.clientObservedMiBps > 0);
       assert.ok(typeof cm.medianSendMs === 'number');
       assert.ok(typeof cm.medianHashMs === 'number');
@@ -212,6 +214,34 @@ test('Client concurrency, failure injection, and clientMetrics tests', async (t)
       assert.equal(finalMetricsRes.json.counters.committed, 7);
       assert.equal(finalMetricsRes.json.counters.checksumMismatches, 1);
       assert.equal(finalMetricsRes.json.counters.retries, 1); // 1 retry on index 2
+    }
+  );
+
+  await t.test(
+    'A6: CLI-style call without contentType creates media with Content-Type video/mp4 on GET',
+    async () => {
+      // Upload small 1 MiB file without specifying contentType
+      const smallPath = path.join(testFilesDir, 'small.mp4');
+      await generateFile(1024 * 1024, smallPath, 'small-mp4-test');
+
+      const summary = await uploadFile({
+        baseUrl,
+        filePath: smallPath,
+        chunkSize: 1024 * 1024,
+        finalize: true,
+        log: () => {}
+      });
+
+      assert.equal(summary.state, 'ready');
+      assert.ok(summary.media?.mediaId);
+
+      // GET /api/media/:mediaId
+      const mediaRes = await makeRequest(port, {
+        path: `/api/media/${summary.media.mediaId}`,
+        method: 'GET'
+      });
+      assert.equal(mediaRes.statusCode, 200);
+      assert.equal(mediaRes.headers['content-type'], 'video/mp4');
     }
   );
 

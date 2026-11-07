@@ -297,7 +297,7 @@ async function uploadFile({
   baseUrl = 'http://127.0.0.1:3000',
   filePath,
   filename,
-  contentType = 'application/octet-stream',
+  contentType = 'video/mp4',
   chunkSize = 1048576,
   uploadId: initialUploadId,
   stopAfter,
@@ -439,6 +439,9 @@ async function uploadFile({
   const runEndMs = Number(process.hrtime.bigint() / 1000000n);
   const elapsedMs = Math.max(0, runEndMs - runStartMs);
 
+  const clientObservedBytesPerSecond =
+    elapsedMs > 0 ? Math.floor((bytesSentThisRun * 1000) / elapsedMs) : 0;
+
   const clientObservedMiBps =
     elapsedMs <= 0
       ? 0
@@ -451,6 +454,7 @@ async function uploadFile({
     basis: 'client-observed',
     elapsedMs,
     bytesSentThisRun,
+    clientObservedBytesPerSecond,
     clientObservedMiBps,
     medianSendMs,
     medianHashMs,

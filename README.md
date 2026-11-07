@@ -572,6 +572,56 @@ node scripts/simulate-interruption.js upload /tmp/test-12m.bin --corrupt-chunk 2
 
 ---
 
+## Web UI (Checkpoint 6B)
+
+A vanilla, zero-dependency browser interface is served directly by the server to provide real-time visibility into the upload lifecycle, transfer ledger, performance metrics, and media playback.
+
+### Accessing the Web UI
+Open your browser to:
+```
+http://127.0.0.1:3000/
+```
+
+> **Security Context Requirement (`crypto.subtle`)**:
+> The browser UI utilizes the W3C Web Cryptography API (`crypto.subtle.digest`) to compute SHA-256 chunk hashes locally before transmission. In accordance with web platform security standards, `crypto.subtle` is **only available in Secure Contexts** (`https://` or `http://localhost` / `http://127.0.0.1`). Connecting over plain-HTTP across external LAN IP addresses (e.g., `http://192.168.1.50:3000`) will disable Web Crypto; always use `127.0.0.1` or `localhost`.
+
+### Content Security Policy (CSP)
+The static file server enforces a strict CSP header on HTML responses:
+```http
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+```
+- No inline scripts (`<script>...`) or styles (`style="..."`) are permitted.
+- No third-party domains, CDNs, or external fonts are loaded.
+- All dynamic UI elements are populated using `document.createElement` and `textContent` (never `innerHTML` or `eval`).
+
+### UI Panels Overview
+1. **Upload Configuration Panel**: File selection (file picker & drag-and-drop zone), content-type selection constrained to server allow-list (defaults to `video/mp4`), chunk size selection (256 KiB, 1 MiB, 4 MiB, or dynamic heuristic recommendation), concurrency slider (1–4 workers), and control buttons (**Start Upload**, **Interrupt**, **Resume**, **Finalize**).
+2. **Failure Injection ("Demo Tools")**: Configurable parameters for testing resilience:
+   - *Stop after N chunks*: Automatically halts workers after N chunks to demonstrate interrupted transfers.
+   - *Corrupt checksum of chunk I*: Injects an invalid SHA-256 checksum on chunk I to demonstrate server-side `422 Unprocessable Entity` rejection and zero redundant retransmissions upon resume.
+3. **Ingestion Lifecycle Pills**: Real-time status indicator tracking `created` → `uploading` → `finalizing` → `ready`.
+4. **Proof-of-Progress Ledger Grid**:
+   - Visual chunk grid using bounded bucketing (at most 256 cells) to prevent DOM bloat on multi-gigabyte files.
+   - Multi-modal state differentiation: distinct borders, background patterns, and Unicode glyphs (`✔` committed, `⏳` in flight, `✖` failed, `🔧` repaired, `◐` partial, `·` missing) ensure accessibility without relying solely on color.
+   - Authoritative text range display: committed byte ranges and missing byte ranges as reported by the server ledger.
+   - Durable progress bar reflecting strictly server-committed bytes (`committedBytes / expectedSize`).
+5. **Real-Time Telemetry & Performance Metrics**:
+   - Server-observed throughput (MiB/s) and client-observed throughput (including client hashing overhead).
+   - Dynamic ETA calculation (displayed only when sufficient chunk data exists).
+   - Resend efficiency percentage, retry count, duplicate count, and repair count.
+   - Non-overlapping `activeMs` vs monotonic `wallMs`.
+   - Per-chunk verified digest ledger and final whole-file SHA-256.
+6. **Resume Session Persistence**: File fingerprinting (`name + size + lastModified`) stored in browser `localStorage` (safely isolated with try/catch). Re-selecting an interrupted file detects existing sessions and queries the server for uncommitted chunks. If the session expired (`session_gone`), the user is prompted to start a clean upload.
+7. **Media Player & Catalog**: Automatic media listing (`GET /api/media`). Selecting an assembled video mounts a native `<video controls>` element with direct streaming from `/api/media/<id>` and an explicit download link (`?download=1`).
+8. **Interactive HTTP Range Probe**: Educational widget demonstrating RFC 9110 byte-range slicing without full downloads. Preset buttons (*First 1 KiB*, *Middle 1 KiB*, *Last 500 bytes*, *Past EOF 416*, *Malformed 400*, and Custom Range) issue range requests, inspect response headers (`Content-Range`, `Content-Length`, `ETag`), and abort connection bodies immediately to avoid unnecessary buffering.
+9. **Accessible Error Banner**: Prominent, dismissible error notifications displaying server error codes and sanitized status messages via `textContent`.
+
+### Memory Bounds & Whole-File Hash Design
+- **Why the browser skips whole-file hashing**: The W3C `crypto.subtle.digest()` API lacks streaming or incremental chunk updates; computing a whole-file SHA-256 in the browser requires loading the entire file into a contiguous memory `ArrayBuffer`, which crashes the browser tab with Out-Of-Memory (OOM) errors on large media files. Instead, the browser verifies small 1 MiB chunk slices in memory, while the server calculates and verifies the whole-file digest during disk assembly.
+- **Client Memory Cap**: At any given moment, client memory is bounded to at most `concurrency × chunkSize` (e.g. 4 × 16 MiB = 64 MiB maximum).
+
+---
+
 ## Known Limitations & Design Decisions
 
 - **Process-Local Metrics State**: The metrics store maintains an in-memory LRU cache (capped at 200 sessions) and a rolling window of recent chunk transfers. Periodic debounced writes persist state to `storage/uploads/<id>/metrics.json`. In a multi-process cluster, disk metrics are shared after persistence, but in-memory rolling windows and active interval mergers are isolated to each worker process.

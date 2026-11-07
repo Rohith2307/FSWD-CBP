@@ -1,1 +1,330 @@
-<!-- Web UI: proof-of-progress chunk timeline, upload controls, and media player (Checkpoint 8) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content = "width=device-width, initial-scale=1.0">
+  <title>Scalable File Stream & Resumable Upload Service</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/chunkMath.js" defer></script>
+  <script src="/uploader.js" defer></script>
+  <script src="/ledgerView.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-inner">
+      <h1>File Stream Service</h1>
+      <p class="tagline">Resumable chunked uploads &middot; Durable integrity ledger &middot; HTTP Range media streaming</p>
+    </div>
+  </header>
+
+  <main class="app-main">
+    <!-- Live status announcements for screen readers -->
+    <div id="live-announcer" class="sr-only" aria-live="polite"></div>
+
+    <!-- Error Banner Area -->
+    <section id="error-banner" class="alert-box alert-error is-hidden" role="alert">
+      <div class="alert-content">
+        <strong id="error-code" class="alert-title"></strong>
+        <span id="error-message" class="alert-msg"></span>
+      </div>
+      <button type="button" id="btn-dismiss-error" class="btn-icon" aria-label="Dismiss error">&times;</button>
+    </section>
+
+    <!-- State Progression Pills -->
+    <nav class="state-nav" aria-label="Upload session progress">
+      <ol class="state-pills">
+        <li id="pill-created" class="state-pill">1. Created</li>
+        <li id="pill-uploading" class="state-pill">2. Uploading</li>
+        <li id="pill-finalizing" class="state-pill">3. Finalizing</li>
+        <li id="pill-ready" class="state-pill">4. Ready</li>
+      </ol>
+    </nav>
+
+    <div class="dashboard-grid">
+      <!-- Panel 1 & 2: Upload Controls & Failure Injection Tools -->
+      <section class="card panel-upload" aria-labelledby="heading-upload">
+        <h2 id="heading-upload" class="card-title">Upload Configuration</h2>
+
+        <!-- Dropzone -->
+        <div id="dropzone" class="dropzone" tabindex="0" role="region" aria-label="File dropzone">
+          <input type="file" id="file-input" class="file-input">
+          <div class="dropzone-prompt">
+            <span class="dropzone-icon">&#8682;</span>
+            <span id="dropzone-label">Drag &amp; drop a file here or click to browse</span>
+            <span id="file-details" class="file-details"></span>
+          </div>
+        </div>
+
+        <div id="type-warning" class="warning-box is-hidden">
+          Note: <code>application/octet-stream</code> files are served as direct downloads, not played in the browser.
+        </div>
+
+        <div id="resume-banner" class="resume-box is-hidden">
+          <span class="resume-msg">&#9851; Previous upload session detected for this file.</span>
+          <button type="button" id="btn-fresh-upload" class="btn btn-secondary btn-sm">Discard &amp; Start Fresh</button>
+        </div>
+
+        <form id="upload-form" class="form-grid">
+          <div class="form-group">
+            <label for="select-content-type">Content Type</label>
+            <select id="select-content-type" name="contentType">
+              <option value="video/mp4">video/mp4 (H.264 / AAC)</option>
+              <option value="video/webm">video/webm (VP8 / VP9 / Opus)</option>
+              <option value="audio/mpeg">audio/mpeg (MP3)</option>
+              <option value="audio/ogg">audio/ogg (Vorbis / Opus)</option>
+              <option value="image/png">image/png</option>
+              <option value="image/jpeg">image/jpeg</option>
+              <option value="application/octet-stream">application/octet-stream (binary)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <div class="label-with-action">
+              <label for="select-chunk-size">Chunk Size</label>
+              <button type="button" id="btn-get-rec" class="btn-link">Get Server Advice</button>
+            </div>
+            <select id="select-chunk-size" name="chunkSize">
+              <option value="262144">256 KiB (low latency)</option>
+              <option value="1048576" selected>1 MiB (nominal default)</option>
+              <option value="4194304">4 MiB (high throughput)</option>
+            </select>
+            <div id="rec-info" class="hint-text is-hidden"></div>
+          </div>
+
+          <div class="form-group">
+            <label for="select-concurrency">Parallel Workers (Concurrency)</label>
+            <select id="select-concurrency" name="concurrency">
+              <option value="1" selected>1 worker (sequential)</option>
+              <option value="2">2 parallel workers</option>
+              <option value="3">3 parallel workers</option>
+              <option value="4">4 parallel workers</option>
+            </select>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="check-auto-finalize" checked>
+              <span>Auto-finalize when all chunks complete</span>
+            </label>
+          </div>
+
+          <!-- Failure Injection Demo Tools -->
+          <fieldset class="demo-fieldset">
+            <legend class="demo-legend">Demo Tools (Failure Injection)</legend>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="input-stop-after">Stop after N chunks</label>
+                <input type="number" id="input-stop-after" min="1" placeholder="e.g. 5">
+              </div>
+              <div class="form-group">
+                <label for="input-corrupt-chunk">Corrupt chunk checksum</label>
+                <input type="number" id="input-corrupt-chunk" min="0" placeholder="chunk index (e.g. 2)">
+              </div>
+            </div>
+          </fieldset>
+
+          <div class="btn-toolbar">
+            <button type="button" id="btn-start" class="btn btn-primary" disabled>Start Upload</button>
+            <button type="button" id="btn-interrupt" class="btn btn-warning" disabled>Interrupt</button>
+            <button type="button" id="btn-resume" class="btn btn-primary is-hidden">Resume</button>
+            <button type="button" id="btn-finalize" class="btn btn-secondary" disabled>Finalize</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Panel 4: Proof-of-Progress Ledger & Visualizer -->
+      <section class="card panel-ledger" aria-labelledby="heading-ledger">
+        <h2 id="heading-ledger" class="card-title">Proof-of-Progress Chunk Ledger</h2>
+
+        <div class="progress-container">
+          <div class="progress-bar-wrap">
+            <div id="progress-bar-durable" class="progress-bar-fill" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+          </div>
+          <div class="progress-stats">
+            <span id="progress-pct">0%</span>
+            <span id="progress-bytes">0 / 0 bytes</span>
+            <span id="progress-inflight" class="badge-inflight">0 in flight</span>
+          </div>
+          <div class="progress-note">Durable progress counts only server-verified bytes committed to disk.</div>
+        </div>
+
+        <!-- Bucketized Chunk Grid -->
+        <div class="ledger-grid-wrap">
+          <div id="ledger-grid" class="ledger-grid" role="region" aria-label="Chunk visualization grid"></div>
+        </div>
+
+        <!-- Legend (with patterns/glyphs/borders) -->
+        <div class="ledger-legend">
+          <div class="legend-item"><span class="legend-swatch swatch-committed">&#10003;</span> Committed</div>
+          <div class="legend-item"><span class="legend-swatch swatch-inflight">&#8635;</span> In-Flight</div>
+          <div class="legend-item"><span class="legend-swatch swatch-repaired">&#9851;</span> Repaired</div>
+          <div class="legend-item"><span class="legend-swatch swatch-partial">&#9684;</span> Partial Cell</div>
+          <div class="legend-item"><span class="legend-swatch swatch-missing">&middot;</span> Missing</div>
+          <div class="legend-item"><span class="legend-swatch swatch-failed">&#10007;</span> Failed (422)</div>
+        </div>
+
+        <div class="ranges-detail">
+          <div class="range-col">
+            <h3>Committed Byte Ranges</h3>
+            <div id="ranges-committed" class="range-list"><em>None</em></div>
+          </div>
+          <div class="range-col">
+            <h3>Missing Byte Ranges</h3>
+            <div id="ranges-missing" class="range-list"><em>All</em></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Panel 5: Metrics & Observability -->
+      <section class="card panel-metrics" aria-labelledby="heading-metrics">
+        <h2 id="heading-metrics" class="card-title">Telemetry &amp; Performance Metrics</h2>
+
+        <div class="metrics-grid">
+          <div class="metric-box">
+            <div class="metric-label">Server Throughput</div>
+            <div id="metric-server-speed" class="metric-val">0.00 MiB/s</div>
+            <div class="metric-sub">server-observed (committed)</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Client Throughput</div>
+            <div id="metric-client-speed" class="metric-val">0.00 MiB/s</div>
+            <div class="metric-sub">client-observed (incl. hashing)</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Estimated Time Remaining</div>
+            <div id="metric-eta" class="metric-val">Not enough data yet</div>
+            <div id="metric-eta-sub" class="metric-sub">based on windowed throughput</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label" title="activeMs excludes idle pauses; wallMs spans first attempt to last commit">
+              Active vs Wall Time &#9432;
+            </div>
+            <div id="metric-times" class="metric-val">0ms / 0ms</div>
+            <div class="metric-sub">activeMs / wallMs</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Resend Efficiency</div>
+            <div id="metric-resend-eff" class="metric-val">0.00%</div>
+            <div class="metric-sub">duplicate/repair byte overhead</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Transmission Retries</div>
+            <div id="metric-retries" class="metric-val">0</div>
+            <div class="metric-sub">network &amp; 5xx attempts</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Integrity Verification</div>
+            <div id="metric-integrity" class="metric-val">0 mismatches</div>
+            <div class="metric-sub">chunk SHA-256 checks</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-label">Assembly Time</div>
+            <div id="metric-assembly" class="metric-val">-</div>
+            <div class="metric-sub">disk concatenation</div>
+          </div>
+        </div>
+
+        <div id="final-sha-wrap" class="sha-box is-hidden">
+          <span class="sha-label">Whole-File SHA-256 (Server Computed):</span>
+          <code id="final-sha-val" class="sha-val"></code>
+        </div>
+
+        <!-- Verified Chunks Table -->
+        <details id="details-chunks-table" class="chunks-accordion">
+          <summary>Verified Chunk Ledger Table (from ?verify=true)</summary>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Index</th>
+                  <th>Byte Range</th>
+                  <th>SHA-256 Checksum</th>
+                  <th>Committed At</th>
+                </tr>
+              </thead>
+              <tbody id="chunks-table-body">
+                <tr><td colspan="4">No committed chunks</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </section>
+
+      <!-- Panel 7: Published Media Player & Library -->
+      <section class="card panel-media" aria-labelledby="heading-media">
+        <div class="card-header-row">
+          <h2 id="heading-media" class="card-title">Media Library</h2>
+          <button type="button" id="btn-refresh-media" class="btn btn-secondary btn-sm">Refresh</button>
+        </div>
+
+        <div class="media-layout">
+          <div class="media-list-wrap">
+            <ul id="media-list" class="media-list" role="listbox" aria-label="Published media files">
+              <li class="media-empty">No media published yet. Finalize an upload to publish.</li>
+            </ul>
+          </div>
+
+          <div class="media-viewer">
+            <div id="player-container" class="player-container">
+              <p class="player-placeholder">Select a media item from the list to stream or probe.</p>
+            </div>
+            <div id="media-info" class="media-info is-hidden">
+              <div class="media-prop"><span class="prop-k">File:</span> <span id="info-name" class="prop-v"></span></div>
+              <div class="media-prop"><span class="prop-k">Size:</span> <span id="info-size" class="prop-v"></span></div>
+              <div class="media-prop"><span class="prop-k">Type:</span> <span id="info-type" class="prop-v"></span></div>
+              <div class="media-prop"><span class="prop-k">SHA-256:</span> <code id="info-sha" class="prop-v code-sm"></code></div>
+              <div class="media-prop"><span class="prop-k">Download:</span> <a id="info-download" class="prop-v" href="#">Download (?download=1)</a></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Panel 8: HTTP Range Stream Probe -->
+      <section class="card panel-probe" aria-labelledby="heading-probe">
+        <h2 id="heading-probe" class="card-title">HTTP Range Probe (206 Demonstration)</h2>
+        <p class="probe-hint">
+          Issue HTTP Range requests without opening DevTools. Headers are inspected and the response body is immediately aborted.
+          <em>(Tip: You can also seek in the media player and inspect 206 responses in browser DevTools).</em>
+        </p>
+
+        <div class="probe-presets">
+          <button type="button" class="btn btn-preset" data-range="bytes=0-1023">First 1 KiB (0-1023)</button>
+          <button type="button" class="btn btn-preset" data-range="bytes=1048576-2097151">Middle 1 MiB Chunk</button>
+          <button type="button" class="btn btn-preset" data-range="bytes=-500">Suffix: Last 500 B (-500)</button>
+          <button type="button" class="btn btn-preset" data-range="bytes=999999999-">Past End (Expect 416)</button>
+          <button type="button" class="btn btn-preset" data-range="bytes=500-100">Malformed (Expect 400)</button>
+        </div>
+
+        <form id="probe-form" class="probe-form">
+          <div class="probe-input-row">
+            <label for="input-custom-range" class="sr-only">Custom Range Header</label>
+            <input type="text" id="input-custom-range" placeholder="e.g. bytes=0-1023" value="bytes=0-1023">
+            <button type="submit" id="btn-send-probe" class="btn btn-primary" disabled>Probe Range</button>
+          </div>
+        </form>
+
+        <div id="probe-result-box" class="probe-results is-hidden">
+          <div class="probe-summary">
+            Status: <span id="probe-status" class="status-tag"></span>
+          </div>
+          <table class="probe-headers-table">
+            <thead>
+              <tr><th>Header</th><th>Server Value</th></tr>
+            </thead>
+            <tbody id="probe-headers-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <div class="footer-inner">
+      <span>Scalable File Upload &amp; Streaming Media Service</span> &middot;
+      <span>Node.js Core Modules Only</span> &middot;
+      <span>Zero Dependencies</span>
+    </div>
+  </footer>
+</body>
+</html>

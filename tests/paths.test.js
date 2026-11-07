@@ -25,6 +25,10 @@ test('paths - valid identifiers and paths generation', () => {
     paths.metadataPath(validId, tmpRoot),
     path.join(tmpRoot, 'uploads', validId, 'metadata.json')
   );
+  assert.equal(
+    paths.metricsPath(validId, tmpRoot),
+    path.join(tmpRoot, 'uploads', validId, 'metrics.json')
+  );
   assert.equal(paths.tempDir(tmpRoot), path.join(tmpRoot, 'temp'));
   assert.equal(paths.mediaDir(tmpRoot), path.join(tmpRoot, 'media'));
   assert.equal(

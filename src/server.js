@@ -1,9 +1,11 @@
 const http = require('node:http');
+const path = require('node:path');
 const defaultConfig = require('./config');
 const { ensureStorageDirs } = require('./storage/paths');
 const { registerUploadRoutes } = require('./routes/uploads');
 const { registerMediaRoutes } = require('./routes/media');
 const { registerMetricsRoutes } = require('./routes/metrics');
+const { registerStaticRoutes } = require('./routes/static');
 const { createMetricsStore } = require('./services/metricsStore');
 const { sendJson, sendError } = require('./utils/http');
 const {
@@ -149,6 +151,12 @@ function createServer(overrideConfig = {}) {
   // Register metrics routes
   registerMetricsRoutes(router, {
     metricsStore
+  });
+
+  // Register static file routes AFTER the API routes (publicDir is an explicit option, NOT an env var)
+  const publicDir = overrideConfig.publicDir || path.resolve(__dirname, '..', 'public');
+  registerStaticRoutes(router, {
+    publicDir
   });
 
   const server = http.createServer(async (req, res) => {

@@ -75,7 +75,8 @@ test('Metrics integration tests', async (t) => {
     maxUploadBytes: 100 * 1024 * 1024,
     defaultChunkBytes: 1024 * 1024,
     minChunkBytes: 100,
-    maxChunkBytes: 16 * 1024 * 1024
+    maxChunkBytes: 16 * 1024 * 1024,
+    maxConcurrentUploads: 100
   });
 
   let port;
@@ -783,6 +784,102 @@ test('Metrics integration tests', async (t) => {
       fs.rmSync(root2, { recursive: true, force: true });
     }
   });
+
+  await t.test(
+    'A3: wallMs monotonic tracking ensures activeMs <= wallMs for single, parallel, and sequential chunks + reload',
+    async () => {
+      // 1. Single chunk upload
+      const resSingle = await makeRequest(
+        port,
+        { path: '/api/uploads', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        JSON.stringify({ filename: 'single.bin', size: 1000, contentType: 'application/octet-stream', chunkSize: 1000 })
+      );
+      const idSingle = resSingle.json.uploadId;
+      await sendChunkDirect(port, idSingle, 0, Buffer.alloc(1000, 0x01), 1000);
+      const mSingle = await makeRequest(port, { path: `/api/metrics/${idSingle}`, method: 'GET' });
+      assert.equal(mSingle.statusCode, 200);
+      assert.ok(mSingle.json.timing.wallMs >= mSingle.json.timing.activeMs, `wallMs (${mSingle.json.timing.wallMs}) must be >= activeMs (${mSingle.json.timing.activeMs})`);
+
+      // 2. 4 parallel chunks upload
+      const resParallel = await makeRequest(
+        port,
+        { path: '/api/uploads', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        JSON.stringify({ filename: 'parallel.bin', size: 4000, contentType: 'application/octet-stream', chunkSize: 1000 })
+      );
+      const idParallel = resParallel.json.uploadId;
+      await Promise.all([
+        sendChunkDirect(port, idParallel, 0, Buffer.alloc(1000, 0x01), 4000),
+        sendChunkDirect(port, idParallel, 1, Buffer.alloc(1000, 0x02), 4000),
+        sendChunkDirect(port, idParallel, 2, Buffer.alloc(1000, 0x03), 4000),
+        sendChunkDirect(port, idParallel, 3, Buffer.alloc(1000, 0x04), 4000)
+      ]);
+      const mParallel = await makeRequest(port, { path: `/api/metrics/${idParallel}`, method: 'GET' });
+      assert.equal(mParallel.statusCode, 200);
+      assert.ok(mParallel.json.timing.wallMs >= mParallel.json.timing.activeMs, `wallMs (${mParallel.json.timing.wallMs}) must be >= activeMs (${mParallel.json.timing.activeMs}) for parallel`);
+
+      // 3. Sequential chunks upload
+      const resSeq = await makeRequest(
+        port,
+        { path: '/api/uploads', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        JSON.stringify({ filename: 'seq.bin', size: 3000, contentType: 'application/octet-stream', chunkSize: 1000 })
+      );
+      const idSeq = resSeq.json.uploadId;
+      for (let i = 0; i < 3; i++) {
+        await sendChunkDirect(port, idSeq, i, Buffer.alloc(1000, i + 1), 3000);
+      }
+      const mSeq = await makeRequest(port, { path: `/api/metrics/${idSeq}`, method: 'GET' });
+      assert.equal(mSeq.statusCode, 200);
+      assert.ok(mSeq.json.timing.wallMs >= mSeq.json.timing.activeMs, `wallMs (${mSeq.json.timing.wallMs}) must be >= activeMs (${mSeq.json.timing.activeMs}) for sequential`);
+
+      // 4. Persist and reload test (flushing and reading back)
+      await app.metricsStore.flush(idSeq);
+      const loaded = await app.metricsStore.getReport(idSeq);
+      assert.ok(loaded.timing.wallMs >= loaded.timing.activeMs);
+
+      // Backwards compatibility: test loading an old metrics.json missing firstStartMs / lastEndMs
+      const resOld = await makeRequest(
+        port,
+        { path: '/api/uploads', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        JSON.stringify({ filename: 'old.bin', size: 1000, contentType: 'application/octet-stream', chunkSize: 1000 })
+      );
+      const idOld = resOld.json.uploadId;
+      const oldMetricsPayload = {
+        uploadId: idOld,
+        counters: { attempts: 1, committed: 1, duplicates: 0, repaired: 0, rejected: 0, conflicts: 0, checksumMismatches: 0, aborted: 0 },
+        perIndexAttempts: { 0: 1 },
+        bytes: { declaredOnAttempts: 1000, committed: 1000, resent: 0 },
+        mergedIntervals: [{ startMs: 100, endMs: 150 }],
+        recentRecords: [{ bytes: 1000, startMs: 100, endMs: 150 }],
+        chunkDurationsMs: [50],
+        firstAttemptAt: '2026-11-07T10:00:00.000Z',
+        lastCommitAt: '2026-11-07T10:00:01.000Z'
+      };
+      fs.writeFileSync(paths.metricsPath(idOld, tmpRoot), JSON.stringify(oldMetricsPayload), 'utf8');
+      const oldLoaded = await app.metricsStore.getReport(idOld);
+      assert.ok(oldLoaded);
+      assert.equal(oldLoaded.timing.wallMs, 1000);
+    }
+  );
+
+  await t.test(
+    'A4: finalize on 20 random unknown well-formed ids leaves getServerStats().trackedUploads unchanged',
+    async () => {
+      const initialStats = app.metricsStore.getServerStats();
+      const initialTracked = initialStats.trackedUploads;
+
+      for (let i = 0; i < 20; i++) {
+        const fakeId = crypto.randomUUID();
+        const res = await makeRequest(port, {
+          path: `/api/uploads/${fakeId}/finalize`,
+          method: 'POST'
+        });
+        assert.equal(res.statusCode, 404);
+      }
+
+      const postStats = app.metricsStore.getServerStats();
+      assert.equal(postStats.trackedUploads, initialTracked, 'trackedUploads must not increase on unknown finalize 404s');
+    }
+  );
 
   await t.test('stop server and clean up', async () => {
     await app.stop();
