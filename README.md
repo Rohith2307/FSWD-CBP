@@ -395,6 +395,7 @@ npm test
 4. **No Authentication or TLS**: The server is designed for local-first use and localhost binding. Deploying to public networks requires an SSL/TLS termination proxy (e.g. Nginx, Caddy) and JWT/OAuth token verification.
 5. **No Multi-Range Support**: Requests containing multiple byte ranges (e.g., `Range: bytes=0-10, 20-30`) fall back to full-file 200 responses rather than `multipart/byteranges`.
 6. **Browser Whole-File Hash**: Modern browsers lack streaming whole-file SHA-256 APIs in Web Cryptography; the client hashes individual chunks, and the server calculates the final whole-file digest during assembly.
+7. **Benchmark Status**: `benchmark: not run` in production deployment environments (automated local benchmark harness provided in `scripts/benchmark.js`).
 
 ---
 

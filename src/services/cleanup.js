@@ -326,8 +326,10 @@ async function sweepOrphans({ storageRoot, orphanGraceMs, nowMs = Date.now(), dr
             const stat = await fs.promises.lstat(chunkFilePath);
             if (stat.isSymbolicLink() || !stat.isFile()) continue;
 
-            const chunkIndex = paths.parseChunkFilename(chunkFileName);
-            if (chunkIndex === null) continue;
+            const match = /^(\d{6,})\.part$/.exec(chunkFileName);
+            if (!match) continue;
+
+            const chunkIndex = Number(match[1]);
             const isCommitted = committedIndices.has(chunkIndex);
 
             if (!isCommitted) {
