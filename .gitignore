@@ -1,0 +1,11 @@
+# Runtime data storage
+storage/
+
+# Node dependencies (if any added in future)
+node_modules/
+
+# Test output
+test_output.txt
+
+.DS_Store
+*.log

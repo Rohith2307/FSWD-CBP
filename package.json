@@ -1,0 +1,21 @@
+{
+  "name": "file-stream-service",
+  "version": "1.0.0",
+  "description": "Scalable File Upload & Streaming Media Service using Node.js core modules",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "streaming",
+    "resumable-upload",
+    "byte-range",
+    "chunked-upload",
+    "nodejs"
+  ],
+  "author": "",
+  "license": "ISC"
+}
