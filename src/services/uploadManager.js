@@ -37,21 +37,23 @@ function withCreateLock(storageRoot, fn) {
   const current = new Promise((resolve) => {
     release = resolve;
   });
-  createLocks.set(
-    storageRoot,
-    previous.catch(() => {}).then(() => current)
-  );
+  const chained = previous.catch(() => {}).then(() => current);
+  createLocks.set(storageRoot, chained);
 
   return previous.catch(() => {}).then(async () => {
     try {
       return await fn();
     } finally {
       release();
-      if (createLocks.get(storageRoot) === current) {
+      if (createLocks.get(storageRoot) === chained) {
         createLocks.delete(storageRoot);
       }
     }
   });
+}
+
+function _createLockCount() {
+  return createLocks.size;
 }
 
 /**
@@ -274,5 +276,6 @@ module.exports = {
   createUpload,
   getUploadOrThrow,
   getUploadStatus,
-  CONTENT_TYPE_EXTENSIONS
+  CONTENT_TYPE_EXTENSIONS,
+  _createLockCount
 };

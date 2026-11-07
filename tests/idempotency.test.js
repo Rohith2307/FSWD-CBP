@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { createServer } = require('../src/server');
 const { updateMetadata, _lockCount } = require('../src/storage/metadataStore');
+const { createUpload, _createLockCount } = require('../src/services/uploadManager');
 
 function makeRequest(port, options = {}, body = null) {
   return new Promise((resolve, reject) => {
@@ -86,6 +87,44 @@ test('A1 - updateMetadata unhandledRejection prevention and lock draining', asyn
     assert.equal(_lockCount(), 0, 'Lock count should be 0 after queue drains');
   } finally {
     process.removeListener('unhandledRejection', onUnhandled);
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('F5: uploadManager createLocks Map entry deleted when idle', async () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fss-createlock-test-'));
+  try {
+    const config = {
+      maxConcurrentUploads: 5,
+      maxUploadBytes: 10 * 1024 * 1024,
+      minChunkBytes: 64 * 1024,
+      defaultChunkBytes: 128 * 1024,
+      maxChunkBytes: 512 * 1024,
+      allowedContentTypes: ['application/octet-stream'],
+      maxFilenameLength: 255
+    };
+
+    // Run 5 parallel creates
+    const creates = Array.from({ length: 5 }, (_, i) =>
+      createUpload(
+        {
+          filename: `file-${i}.bin`,
+          size: 128 * 1024,
+          contentType: 'application/octet-stream',
+          chunkSize: 128 * 1024
+        },
+        tmpRoot,
+        config
+      )
+    );
+
+    const results = await Promise.all(creates);
+    assert.equal(results.length, 5);
+
+    // Let the finally block settle
+    await new Promise((r) => setImmediate(r));
+    assert.equal(_createLockCount(), 0, '_createLockCount must be 0 when idle');
+  } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

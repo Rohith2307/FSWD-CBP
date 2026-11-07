@@ -231,34 +231,43 @@ test('cleanup: Storage cleanup and session lifecycle service tests', async (t) =
     assert.equal(readBack.state, 'ready');
   });
 
-  await t.test('sweepOrphans: orphan chunk older than grace deleted, committed chunk kept, young orphan kept', async () => {
+  await t.test('F1: sweepOrphans: chunk files named NNNNNN.part; old uncommitted 000005.part deleted, committed kept, young kept, non-matching ignored', async () => {
     const uploadId = '44444444-4444-4444-8444-444444444444';
     const chunksDir = paths.chunksDir(uploadId, tmpRoot);
     await fs.promises.mkdir(chunksDir, { recursive: true });
 
-    const committedChunkPath = path.join(chunksDir, '0.chunk');
-    const oldOrphanChunkPath = path.join(chunksDir, '1.chunk');
-    const youngOrphanChunkPath = path.join(chunksDir, '2.chunk');
+    const committedChunkPath = path.join(chunksDir, '000000.part');
+    const oldOrphan5Path = path.join(chunksDir, '000005.part');
+    const youngOrphanChunkPath = path.join(chunksDir, '000002.part');
+    const nonMatchingLegacy = path.join(chunksDir, '0.chunk');
+    const nonMatchingTemp = path.join(chunksDir, 'temp.tmp');
+    const nonMatchingTxt = path.join(chunksDir, 'readme.txt');
 
-    fs.writeFileSync(committedChunkPath, 'committed chunk');
-    fs.writeFileSync(oldOrphanChunkPath, 'old orphan chunk');
-    fs.writeFileSync(youngOrphanChunkPath, 'young orphan chunk');
+    fs.writeFileSync(committedChunkPath, 'committed chunk 0');
+    fs.writeFileSync(oldOrphan5Path, 'old uncommitted 5');
+    fs.writeFileSync(youngOrphanChunkPath, 'young orphan chunk 2');
+    fs.writeFileSync(nonMatchingLegacy, 'legacy non-matching');
+    fs.writeFileSync(nonMatchingTemp, 'temp non-matching');
+    fs.writeFileSync(nonMatchingTxt, 'txt non-matching');
 
     const oldTime = new Date(nowBase - 7200 * 1000);
     const youngTime = new Date(nowBase - 300 * 1000);
 
     fs.utimesSync(committedChunkPath, oldTime, oldTime);
-    fs.utimesSync(oldOrphanChunkPath, oldTime, oldTime);
+    fs.utimesSync(oldOrphan5Path, oldTime, oldTime);
     fs.utimesSync(youngOrphanChunkPath, youngTime, youngTime);
+    fs.utimesSync(nonMatchingLegacy, oldTime, oldTime);
+    fs.utimesSync(nonMatchingTemp, oldTime, oldTime);
+    fs.utimesSync(nonMatchingTxt, oldTime, oldTime);
 
     const meta = {
       uploadId,
       originalName: 'orphan-test.bin',
       safeStoredName: `${uploadId}.bin`,
-      expectedSize: 3000,
+      expectedSize: 6000,
       contentType: 'application/octet-stream',
       chunkSize: 1000,
-      totalChunks: 3,
+      totalChunks: 6,
       createdAt: new Date(nowBase - 10000).toISOString(),
       state: 'uploading',
       chunks: [{ index: 0, start: 0, end: 999, size: 1000, checksum: '1111', committedAt: new Date(nowBase - 10000).toISOString() }]
@@ -275,7 +284,110 @@ test('cleanup: Storage cleanup and session lifecycle service tests', async (t) =
     assert.equal(res.orphanChunksDeleted, 1);
     assert.equal(fs.existsSync(committedChunkPath), true, 'Committed chunk must be kept');
     assert.equal(fs.existsSync(youngOrphanChunkPath), true, 'Young orphan chunk must be kept within grace period');
-    assert.equal(fs.existsSync(oldOrphanChunkPath), false, 'Old orphan chunk must be deleted');
+    assert.equal(fs.existsSync(oldOrphan5Path), false, 'Old uncommitted 000005.part must be deleted');
+    assert.equal(fs.existsSync(nonMatchingLegacy), true, 'Non-matching legacy .chunk file must be ignored');
+    assert.equal(fs.existsSync(nonMatchingTemp), true, 'Non-matching .tmp file must be ignored');
+    assert.equal(fs.existsSync(nonMatchingTxt), true, 'Non-matching .txt file must be ignored');
+  });
+
+  await t.test('F2: expireSessions race: session transitioning to ready during sweep re-checks draft and keeps media intact', async () => {
+    const uploadId = '88888888-8888-4888-8888-888888888888';
+    const uploadDir = paths.uploadDir(uploadId, tmpRoot);
+    const chunksDir = paths.chunksDir(uploadId, tmpRoot);
+    const mediaDir = paths.mediaDir(tmpRoot);
+    await fs.promises.mkdir(chunksDir, { recursive: true });
+    await fs.promises.mkdir(mediaDir, { recursive: true });
+
+    const chunkFile = path.join(chunksDir, '000000.part');
+    const mediaFile = path.join(mediaDir, `${uploadId}.bin`);
+    fs.writeFileSync(chunkFile, 'chunk 0 data');
+    fs.writeFileSync(mediaFile, 'media file data');
+
+    const meta = {
+      uploadId,
+      originalName: 'race-test.bin',
+      safeStoredName: `${uploadId}.bin`,
+      expectedSize: 1000,
+      contentType: 'application/octet-stream',
+      chunkSize: 1000,
+      totalChunks: 1,
+      createdAt: new Date(nowBase - 10000 * 1000).toISOString(),
+      state: 'uploading',
+      chunks: [{ index: 0, start: 0, end: 999, size: 1000, checksum: '1111', committedAt: new Date(nowBase - 10000 * 1000).toISOString() }]
+    };
+    await writeMetadata(uploadId, meta, tmpRoot);
+
+    // Call expireSessions with _beforeExpireHook simulating session becoming ready right before updateMetadata mutator
+    const res = await expireSessions({
+      storageRoot: tmpRoot,
+      sessionTtlMs: 3600 * 1000,
+      nowMs: nowBase,
+      dryRun: false,
+      _beforeExpireHook: async ({ uploadId: uid }) => {
+        // Transition session to ready
+        await writeMetadata(uid, {
+          ...meta,
+          state: 'ready',
+          mediaId: uid,
+          finalizedAt: new Date(nowBase).toISOString()
+        }, tmpRoot);
+      }
+    });
+
+    assert.equal(res.sessionsExpired, 0, 'Session must not be expired because it transitioned to ready');
+    const postMeta = await readMetadata(uploadId, tmpRoot);
+    assert.equal(postMeta.state, 'ready', 'Session must remain in ready state');
+    assert.equal(fs.existsSync(mediaFile), true, 'Media file must remain intact');
+  });
+
+  await t.test('F2: expireSessions race: session receiving new chunk commit stays alive', async () => {
+    const uploadId = '99999999-9999-4999-8999-999999999999';
+    const uploadDir = paths.uploadDir(uploadId, tmpRoot);
+    const chunksDir = paths.chunksDir(uploadId, tmpRoot);
+    await fs.promises.mkdir(chunksDir, { recursive: true });
+
+    const chunk0 = path.join(chunksDir, '000000.part');
+    const chunk1 = path.join(chunksDir, '000001.part');
+    fs.writeFileSync(chunk0, 'chunk 0');
+    fs.writeFileSync(chunk1, 'chunk 1');
+
+    const meta = {
+      uploadId,
+      originalName: 'commit-race.bin',
+      safeStoredName: `${uploadId}.bin`,
+      expectedSize: 2000,
+      contentType: 'application/octet-stream',
+      chunkSize: 1000,
+      totalChunks: 2,
+      createdAt: new Date(nowBase - 10000 * 1000).toISOString(),
+      state: 'uploading',
+      chunks: [{ index: 0, start: 0, end: 999, size: 1000, checksum: '1111', committedAt: new Date(nowBase - 10000 * 1000).toISOString() }]
+    };
+    await writeMetadata(uploadId, meta, tmpRoot);
+
+    // Call expireSessions with _beforeExpireHook simulating chunk 1 commit right before expiry
+    const res = await expireSessions({
+      storageRoot: tmpRoot,
+      sessionTtlMs: 3600 * 1000,
+      nowMs: nowBase,
+      dryRun: false,
+      _beforeExpireHook: async ({ uploadId: uid }) => {
+        await writeMetadata(uid, {
+          ...meta,
+          state: 'uploading',
+          chunks: [
+            ...meta.chunks,
+            { index: 1, start: 1000, end: 1999, size: 1000, checksum: '2222', committedAt: new Date(nowBase).toISOString() }
+          ]
+        }, tmpRoot);
+      }
+    });
+
+    assert.equal(res.sessionsExpired, 0, 'Session must not be expired because fresh chunk commit was received');
+    const postMeta = await readMetadata(uploadId, tmpRoot);
+    assert.equal(postMeta.state, 'uploading');
+    assert.equal(fs.existsSync(chunk0), true, 'Existing chunk must not be deleted');
+    assert.equal(fs.existsSync(chunk1), true, 'New chunk must not be deleted');
   });
 
   await t.test('sweepOrphans: orphan media file deleted, media with JSON kept, missing media file reported in orphanMediaJson', async () => {

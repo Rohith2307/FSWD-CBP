@@ -728,12 +728,15 @@ function createMetricsStore({ storageRoot, config }) {
 
   function getServerStats() {
     const mem = sampleRss();
+    const cpu = process.cpuUsage();
     return {
       uptimeSeconds: Math.floor(process.uptime()),
       rssBytes: mem.rss,
       heapUsedBytes: mem.heapUsed,
       peakRssBytes,
-      trackedUploads: uploads.size
+      trackedUploads: uploads.size,
+      cpuUserMs: Math.floor(cpu.user / 1000),
+      cpuSystemMs: Math.floor(cpu.system / 1000)
     };
   }
 

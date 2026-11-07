@@ -61,6 +61,21 @@ test('config - throws on inverted chunk sizes', () => {
   );
 });
 
+test('F4: config - does not read env vars for any key starting with _', () => {
+  const cfg = loadConfig({
+    _createWriteStream: () => {},
+    _rename: () => {},
+    _testHook: 'ignored',
+    _SESSION_TTL_MS: '123'
+  });
+
+  assert.equal(cfg._createWriteStream, undefined);
+  assert.equal(cfg._rename, undefined);
+  assert.equal(cfg._testHook, undefined);
+  assert.equal(cfg._SESSION_TTL_MS, undefined);
+  assert.equal(cfg.sessionTtlMs, 24 * 60 * 60 * 1000);
+});
+
 test('config - throws on invalid timeout ordering', () => {
   assert.throws(
     () => loadConfig({ REQUEST_TIMEOUT_MS: '20000', HEADERS_TIMEOUT_MS: '30000' }),

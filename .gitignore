@@ -4,8 +4,11 @@ storage/
 # Node dependencies (if any added in future)
 node_modules/
 
-# Test output
+# Test output & temp benchmark output
 test_output.txt
+BENCHMARKS.json
+*.tmp
+*.bin
 
 .DS_Store
 *.log

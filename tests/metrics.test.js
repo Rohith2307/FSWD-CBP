@@ -17,6 +17,7 @@ function makeRequest(port, options = {}, body = null) {
       {
         hostname: '127.0.0.1',
         port,
+        agent: false,
         ...options
       },
       (res) => {
@@ -737,6 +738,8 @@ test('Metrics integration tests', async (t) => {
         assert.ok(typeof statsRes.json.heapUsedBytes === 'number');
         assert.ok(typeof statsRes.json.peakRssBytes === 'number');
         assert.ok(statsRes.json.peakRssBytes >= statsRes.json.rssBytes);
+        assert.ok(Number.isInteger(statsRes.json.cpuUserMs) && statsRes.json.cpuUserMs >= 0);
+        assert.ok(Number.isInteger(statsRes.json.cpuSystemMs) && statsRes.json.cpuSystemMs >= 0);
       } finally {
         await freshServer.stop();
         fs.rmSync(freshRoot, { recursive: true, force: true });

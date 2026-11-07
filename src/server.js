@@ -160,7 +160,7 @@ function createServer(overrideConfig = {}) {
     publicDir
   });
 
-  const enableCleanup = overrideConfig.cleanup !== false;
+  const enableCleanup = overrideConfig.cleanup !== false && activeConfig.cleanupEnabled !== false;
   let cleanupTimer = null;
 
   let inFlightRequests = 0;

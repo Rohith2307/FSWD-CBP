@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test",
+    "bench": "node scripts/benchmark.js",
     "cleanup": "node scripts/cleanup.js"
   },
   "keywords": [

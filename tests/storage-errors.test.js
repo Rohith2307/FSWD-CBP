@@ -308,6 +308,28 @@ test('B3 & B4: Storage errors and corrupt metadata handling', async (t) => {
     }
   });
 
+  await t.test('F3: readMetadata throws internal METADATA_CORRUPT on garbage JSON with no path or cause in response', async () => {
+    const corruptId = 'c0000000-0000-4000-8000-000000000099';
+    const uploadDirPath = paths.uploadDir(corruptId, tmpRoot);
+    await fs.promises.mkdir(uploadDirPath, { recursive: true });
+    const metaPath = paths.metadataPath(corruptId, tmpRoot);
+    fs.writeFileSync(metaPath, '{{{CORRUPT_JSON_DATA', 'utf8');
+
+    const { readMetadata } = require('../src/storage/metadataStore');
+    let thrown = null;
+    try {
+      await readMetadata(corruptId, tmpRoot);
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown, 'readMetadata must throw an error');
+    assert.equal(thrown.statusCode, 500);
+    assert.equal(thrown.code, 'METADATA_CORRUPT');
+    assert.equal(thrown.message, 'Corrupt metadata ledger on disk');
+    assert.equal(thrown.details, null);
+    assert.ok(!thrown.message.includes(tmpRoot), 'No filesystem path leakage in error message');
+  });
+
   await t.test('B4: corrupt metadata.json returns 500 METADATA_CORRUPT without leaks; other endpoints remain healthy', async () => {
     const totalSize = 100000;
     const chunkSize = 100000;

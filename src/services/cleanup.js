@@ -153,7 +153,7 @@ async function sweepTemp({ storageRoot, tempFileTtlMs, nowMs = Date.now(), dryRu
  * @param {boolean} [params.dryRun]
  * @returns {Promise<{ sessionsExpired: number, errors: Array<{ item: string, error: string }> }>}
  */
-async function expireSessions({ storageRoot, sessionTtlMs, nowMs = Date.now(), dryRun = false }) {
+async function expireSessions({ storageRoot, sessionTtlMs, nowMs = Date.now(), dryRun = false, _beforeExpireHook }) {
   const uploadsDirectory = paths.uploadsDir(storageRoot);
   let sessionsExpired = 0;
   const errors = [];
@@ -208,36 +208,65 @@ async function expireSessions({ storageRoot, sessionTtlMs, nowMs = Date.now(), d
 
       if (ageMs >= sessionTtlMs) {
         if (!dryRun) {
-          // Inside updateMetadata, atomically mark state as "expired"
+          // Injectable hook for testing race conditions
+          if (typeof _beforeExpireHook === 'function') {
+            await _beforeExpireHook({ uploadId, metadata });
+          }
+
+          let actuallyExpired = false;
+          // Inside updateMetadata, re-check fresh draft under per-upload lock
           await updateMetadata(uploadId, storageRoot, (draft) => {
+            if (!draft) return draft;
+            if (draft.state === 'ready' || draft.state === 'expired') {
+              return draft;
+            }
+            const isStaleDraftFinalizing =
+              draft.state === 'finalizing' && !activeFinalizations.has(uploadId);
+            const isDraftEligible =
+              draft.state === 'created' || draft.state === 'uploading' || isStaleDraftFinalizing;
+
+            if (!isDraftEligible) {
+              return draft;
+            }
+
+            const freshActivityMs = getSessionNewestActivityMs(draft);
+            if (nowMs - freshActivityMs < sessionTtlMs) {
+              return draft;
+            }
+
             draft.state = 'expired';
             draft.expiredAt = new Date(nowMs).toISOString();
+            actuallyExpired = true;
             return draft;
           });
 
-          // Best-effort removal of chunk files
-          const chunksDirectory = paths.chunksDir(uploadId, storageRoot);
-          try {
-            const chunkFiles = await fs.promises.readdir(chunksDirectory);
-            for (const cf of chunkFiles) {
-              await fs.promises.unlink(path.join(chunksDirectory, cf)).catch(() => {});
-            }
-          } catch {}
-
-          // Best-effort removal of temp part files for this uploadId
-          const tempDirectory = paths.tempDir(storageRoot);
-          try {
-            const tempFiles = await fs.promises.readdir(tempDirectory);
-            for (const tf of tempFiles) {
-              if (tf.startsWith(`${uploadId}-`) && tf.endsWith('.part')) {
-                await fs.promises.unlink(path.join(tempDirectory, tf)).catch(() => {});
+          if (actuallyExpired) {
+            // Best-effort removal of chunk files
+            const chunksDirectory = paths.chunksDir(uploadId, storageRoot);
+            try {
+              const chunkFiles = await fs.promises.readdir(chunksDirectory);
+              for (const cf of chunkFiles) {
+                await fs.promises.unlink(path.join(chunksDirectory, cf)).catch(() => {});
               }
-            }
-          } catch {}
+            } catch {}
 
-          console.log(`[Cleanup] Expired upload session: ${uploadId}`);
+            // Best-effort removal of temp part files for this uploadId
+            const tempDirectory = paths.tempDir(storageRoot);
+            try {
+              const tempFiles = await fs.promises.readdir(tempDirectory);
+              for (const tf of tempFiles) {
+                if (tf.startsWith(`${uploadId}-`) && tf.endsWith('.part')) {
+                  await fs.promises.unlink(path.join(tempDirectory, tf)).catch(() => {});
+                }
+              }
+            } catch {}
+
+            console.log(`[Cleanup] Expired upload session: ${uploadId}`);
+            sessionsExpired++;
+          }
+        } else {
+          sessionsExpired++;
         }
-        sessionsExpired++;
       }
     } catch (err) {
       errors.push({ item: uploadId, error: err.code || err.message });
@@ -297,10 +326,8 @@ async function sweepOrphans({ storageRoot, orphanGraceMs, nowMs = Date.now(), dr
             const stat = await fs.promises.lstat(chunkFilePath);
             if (stat.isSymbolicLink() || !stat.isFile()) continue;
 
-            const match = /^(\d+)\.chunk$/.exec(chunkFileName);
-            if (!match) continue;
-
-            const chunkIndex = Number(match[1]);
+            const chunkIndex = paths.parseChunkFilename(chunkFileName);
+            if (chunkIndex === null) continue;
             const isCommitted = committedIndices.has(chunkIndex);
 
             if (!isCommitted) {
@@ -422,7 +449,8 @@ async function runCleanup({
   storageRoot,
   config = {},
   nowMs = Date.now(),
-  dryRun = false
+  dryRun = false,
+  _beforeExpireHook
 } = {}) {
   if (!storageRoot || typeof storageRoot !== 'string') {
     throw new Error('runCleanup requires storageRoot');
@@ -450,7 +478,7 @@ async function runCleanup({
   }
 
   try {
-    const sessionResult = await expireSessions({ storageRoot, sessionTtlMs, nowMs, dryRun });
+    const sessionResult = await expireSessions({ storageRoot, sessionTtlMs, nowMs, dryRun, _beforeExpireHook });
     report.sessionsExpired = sessionResult.sessionsExpired;
     report.errors.push(...sessionResult.errors);
   } catch (err) {

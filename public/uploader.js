@@ -122,7 +122,7 @@
 
       const totalSize = blob.size;
       const fileName = name || blob.name || 'unnamed.bin';
-      const poolSize = Math.max(1, Math.min(4, Number(concurrency) || 1));
+      const poolSize = Math.max(1, Math.min(16, Number(concurrency) || 1));
 
       let uploadId = explicitUploadId;
 
