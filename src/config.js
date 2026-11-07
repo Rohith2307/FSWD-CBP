@@ -63,6 +63,11 @@ function loadConfig(env = process.env) {
   const headersTimeoutMs = parsePositiveInt(env.HEADERS_TIMEOUT_MS, 'HEADERS_TIMEOUT_MS', 1000) ?? 60000;
   const keepAliveTimeoutMs = parsePositiveInt(env.KEEP_ALIVE_TIMEOUT_MS, 'KEEP_ALIVE_TIMEOUT_MS', 1000) ?? 5000;
 
+  const sessionTtlMs = parsePositiveInt(env.SESSION_TTL_MS, 'SESSION_TTL_MS', 1) ?? 24 * 60 * 60 * 1000;
+  const tempFileTtlMs = parsePositiveInt(env.TEMP_FILE_TTL_MS, 'TEMP_FILE_TTL_MS', 1) ?? 60 * 60 * 1000;
+  const orphanGraceMs = parsePositiveInt(env.ORPHAN_GRACE_MS, 'ORPHAN_GRACE_MS', 1) ?? 60 * 60 * 1000;
+  const cleanupIntervalMs = parsePositiveInt(env.CLEANUP_INTERVAL_MS, 'CLEANUP_INTERVAL_MS', 1) ?? 10 * 60 * 1000;
+
   // Validate chunk size invariants: minChunkBytes <= defaultChunkBytes <= maxChunkBytes
   if (minChunkBytes > defaultChunkBytes) {
     throw new Error(
@@ -94,6 +99,10 @@ function loadConfig(env = process.env) {
     requestTimeoutMs,
     headersTimeoutMs,
     keepAliveTimeoutMs,
+    sessionTtlMs,
+    tempFileTtlMs,
+    orphanGraceMs,
+    cleanupIntervalMs,
     allowedContentTypes: DEFAULT_ALLOWED_CONTENT_TYPES
   });
 }

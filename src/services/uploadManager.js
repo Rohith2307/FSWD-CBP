@@ -28,6 +28,32 @@ const CONTENT_TYPE_EXTENSIONS = Object.freeze({
   'application/octet-stream': 'bin'
 });
 
+// Per-storageRoot async mutex to serialize count active + create
+const createLocks = new Map();
+
+function withCreateLock(storageRoot, fn) {
+  const previous = createLocks.get(storageRoot) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  createLocks.set(
+    storageRoot,
+    previous.catch(() => {}).then(() => current)
+  );
+
+  return previous.catch(() => {}).then(async () => {
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (createLocks.get(storageRoot) === current) {
+        createLocks.delete(storageRoot);
+      }
+    }
+  });
+}
+
 /**
  * Counts currently active upload sessions (state 'created' or 'uploading').
  *
@@ -97,46 +123,48 @@ async function createUpload({ filename, size, contentType, chunkSize }, storageR
     }
   }
 
-  const activeUploads = await countActiveUploads(storageRoot);
-  if (activeUploads >= config.maxConcurrentUploads) {
-    throw conflict(
-      `Too many active uploads (${activeUploads}). Concurrency limit of ${config.maxConcurrentUploads} reached.`
-    );
-  }
+  return withCreateLock(storageRoot, async () => {
+    const activeUploads = await countActiveUploads(storageRoot);
+    if (activeUploads >= config.maxConcurrentUploads) {
+      throw conflict(
+        `Too many active uploads (${activeUploads}). Concurrency limit of ${config.maxConcurrentUploads} reached.`
+      );
+    }
 
-  const uploadId = crypto.randomUUID();
-  const ext = CONTENT_TYPE_EXTENSIONS[contentType] || 'bin';
-  const safeStoredName = `${uploadId}.${ext}`;
+    const uploadId = crypto.randomUUID();
+    const ext = CONTENT_TYPE_EXTENSIONS[contentType] || 'bin';
+    const safeStoredName = `${uploadId}.${ext}`;
 
-  const totalChunks = chunkCount(expectedSize, actualChunkSize);
+    const totalChunks = chunkCount(expectedSize, actualChunkSize);
 
-  const uploadFolderPath = paths.uploadDir(uploadId, storageRoot);
-  const chunksFolderPath = paths.chunksDir(uploadId, storageRoot);
-  await fs.promises.mkdir(uploadFolderPath, { recursive: true });
-  await fs.promises.mkdir(chunksFolderPath, { recursive: true });
+    const uploadFolderPath = paths.uploadDir(uploadId, storageRoot);
+    const chunksFolderPath = paths.chunksDir(uploadId, storageRoot);
+    await fs.promises.mkdir(uploadFolderPath, { recursive: true });
+    await fs.promises.mkdir(chunksFolderPath, { recursive: true });
 
-  const metadata = {
-    uploadId,
-    originalName: sanitizedFilename,
-    safeStoredName,
-    expectedSize,
-    contentType,
-    chunkSize: actualChunkSize,
-    totalChunks,
-    createdAt: new Date().toISOString(),
-    state: 'created',
-    chunks: []
-  };
+    const metadata = {
+      uploadId,
+      originalName: sanitizedFilename,
+      safeStoredName,
+      expectedSize,
+      contentType,
+      chunkSize: actualChunkSize,
+      totalChunks,
+      createdAt: new Date().toISOString(),
+      state: 'created',
+      chunks: []
+    };
 
-  await writeMetadata(uploadId, metadata, storageRoot);
+    await writeMetadata(uploadId, metadata, storageRoot);
 
-  return {
-    uploadId,
-    chunkSize: actualChunkSize,
-    totalChunks,
-    expectedSize,
-    state: 'created'
-  };
+    return {
+      uploadId,
+      chunkSize: actualChunkSize,
+      totalChunks,
+      expectedSize,
+      state: 'created'
+    };
+  });
 }
 
 /**

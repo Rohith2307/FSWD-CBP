@@ -6,6 +6,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { createServer } = require('../src/server');
+const { createMetricsStore } = require('../src/services/metricsStore');
 const paths = require('../src/storage/paths');
 const { generateFile } = require('../scripts/generate-test-file');
 const { uploadFile, computeFileSha256 } = require('../scripts/simulate-interruption');
@@ -878,6 +879,65 @@ test('Metrics integration tests', async (t) => {
 
       const postStats = app.metricsStore.getServerStats();
       assert.equal(postStats.trackedUploads, initialTracked, 'trackedUploads must not increase on unknown finalize 404s');
+    }
+  );
+
+  await t.test(
+    'A3: monotonic rebase on load when monoOriginEpochMs differs by 10 minutes',
+    async () => {
+      const totalSize = 2000;
+      const chunkSize = 1000;
+      const res = await makeRequest(
+        port,
+        { path: '/api/uploads', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        JSON.stringify({ filename: 'rebase.bin', size: totalSize, contentType: 'application/octet-stream', chunkSize })
+      );
+      const uploadId = res.json.uploadId;
+
+      const currentOrigin = Date.now() - app.metricsStore.nowMonotonicMs();
+      const fakeOrigin = currentOrigin - 600000; // 10 minutes earlier
+
+      // Monotonic values relative to the fake origin
+      const fakeStartMs = 50000;
+      const fakeEndMs = 52500; // 2500 ms duration
+
+      const rebasePayload = {
+        uploadId,
+        monoOriginEpochMs: fakeOrigin,
+        counters: { attempts: 1, committed: 1, duplicates: 0, repaired: 0, rejected: 0, conflicts: 0, checksumMismatches: 0, aborted: 0 },
+        perIndexAttempts: { 0: 1 },
+        bytes: { declaredOnAttempts: 1000, committed: 1000, resent: 0 },
+        mergedIntervals: [{ startMs: fakeStartMs, endMs: fakeEndMs }],
+        recentRecords: [{ bytes: 1000, startMs: fakeStartMs, endMs: fakeEndMs }],
+        chunkDurationsMs: [2500],
+        firstStartMs: fakeStartMs,
+        lastEndMs: fakeEndMs,
+        firstAttemptAt: new Date(Date.now() - 600000).toISOString(),
+        lastCommitAt: new Date(Date.now() - 597500).toISOString()
+      };
+
+      fs.writeFileSync(paths.metricsPath(uploadId, tmpRoot), JSON.stringify(rebasePayload), 'utf8');
+
+      // Create a fresh metrics store to force disk load
+      const freshStore = createMetricsStore({ storageRoot: tmpRoot, config: app.config });
+      const loadedReport = await freshStore.getReport(uploadId);
+
+      assert.ok(loadedReport);
+      assert.equal(loadedReport.timing.wallMs, 2500, 'wallMs must be preserved after monotonic rebase');
+      assert.equal(loadedReport.timing.activeMs, 2500, 'activeMs must be preserved after monotonic rebase');
+
+      // Now add a new chunk in the current process monotonic frame
+      const currentMono = app.metricsStore.nowMonotonicMs();
+      freshStore.recordChunkAttempt(uploadId, {
+        index: 1,
+        declaredBytes: 1000,
+        startMs: currentMono + 10,
+        endMs: currentMono + 100,
+        outcome: 'committed'
+      });
+
+      const updatedReport = await freshStore.getReport(uploadId);
+      assert.ok(updatedReport.timing.activeMs <= updatedReport.timing.wallMs, `activeMs (${updatedReport.timing.activeMs}) must be <= wallMs (${updatedReport.timing.wallMs}) after rebase and new chunk`);
     }
   );
 

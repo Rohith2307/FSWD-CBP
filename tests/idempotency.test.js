@@ -422,6 +422,56 @@ test('Idempotency and concurrency integration tests', async (t) => {
     }
   });
 
+  await t.test('B1: 10 parallel POST /api/uploads with maxConcurrentUploads 3 -> exactly 3 return 201 and 7 conflict 409', async () => {
+    const raceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fss-create-race-'));
+    const raceApp = createServer({
+      port: 0,
+      storageRoot: raceRoot,
+      maxConcurrentUploads: 3,
+      cleanup: false
+    });
+    await raceApp.start();
+    const racePort = raceApp.server.address().port;
+
+    try {
+      const promises = [];
+      for (let i = 0; i < 10; i++) {
+        promises.push(
+          makeRequest(
+            racePort,
+            {
+              path: '/api/uploads',
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' }
+            },
+            JSON.stringify({
+              filename: `race-${i}.bin`,
+              size: 1048576,
+              contentType: 'application/octet-stream',
+              chunkSize: 1048576
+            })
+          )
+        );
+      }
+
+      const results = await Promise.all(promises);
+      const created = results.filter((r) => r.statusCode === 201);
+      const conflicts = results.filter((r) => r.statusCode === 409);
+
+      assert.equal(created.length, 3, 'Exactly 3 uploads must be created');
+      assert.equal(conflicts.length, 7, 'Exactly 7 uploads must be rejected with 409 conflict');
+
+      const uploadsDir = path.join(raceRoot, 'uploads');
+      const dirs = fs.readdirSync(uploadsDir).filter((d) => {
+        return fs.statSync(path.join(uploadsDir, d)).isDirectory();
+      });
+      assert.equal(dirs.length, 3, 'Number of upload directories on disk must be exactly 3');
+    } finally {
+      await raceApp.stop();
+      fs.rmSync(raceRoot, { recursive: true, force: true });
+    }
+  });
+
   await t.test('stop server and clean up', async () => {
     await app.stop();
     fs.rmSync(tmpRoot, { recursive: true, force: true });

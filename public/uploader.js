@@ -249,7 +249,7 @@
               if (putRes.ok) {
                 const resJson = await putRes.json().catch(() => ({}));
                 const outcome = resJson.duplicate ? 'duplicate' : resJson.repaired ? 'repaired' : 'committed';
-                if (resJson.duplicate) {
+                if (resJson.duplicate || resJson.repaired) {
                   bytesResent += r.length;
                 }
 
@@ -288,16 +288,17 @@
                 throw permanent;
               }
 
-              // Retryable error
-              attempt++;
-              totalRetries++;
-              if (attempt > maxRetries) {
+              // Retryable 5xx / 408 / 429 error
+              if (attempt >= maxRetries) {
                 const retriesExhausted = new Error(`Retries exhausted for chunk ${idx}: ${errMsg}`);
                 retriesExhausted.statusCode = putRes.status;
                 retriesExhausted.code = errCode;
+                retriesExhausted.isRetriesExhausted = true;
                 throw retriesExhausted;
               }
 
+              attempt++;
+              totalRetries++;
               const delayMs = Math.min(2000, 50 * Math.pow(2, attempt)) + Math.floor(Math.random() * 50);
               onEvent({ type: 'chunk-retry', index: idx, attempt, reason: errMsg, delayMs });
               await sleep(delayMs);
@@ -308,18 +309,27 @@
                 return;
               }
 
-              // If permanent error, bubble immediately
-              if (err.statusCode && err.statusCode >= 400 && err.statusCode < 500 && err.statusCode !== 408 && err.statusCode !== 429) {
+              // If permanent error or retries exhausted, bubble immediately
+              if (
+                err.isRetriesExhausted ||
+                (err.statusCode &&
+                  err.statusCode >= 400 &&
+                  err.statusCode < 500 &&
+                  err.statusCode !== 408 &&
+                  err.statusCode !== 429)
+              ) {
                 throw err;
               }
 
               // Network failure retry
-              attempt++;
-              totalRetries++;
-              if (attempt > maxRetries) {
-                throw err;
+              if (attempt >= maxRetries) {
+                const networkExhausted = new Error(`Network retries exhausted for chunk ${idx}: ${err.message}`);
+                networkExhausted.isRetriesExhausted = true;
+                throw networkExhausted;
               }
 
+              attempt++;
+              totalRetries++;
               const delayMs = Math.min(2000, 50 * Math.pow(2, attempt)) + Math.floor(Math.random() * 50);
               onEvent({ type: 'chunk-retry', index: idx, attempt, reason: err.message, delayMs });
               await sleep(delayMs);
@@ -380,7 +390,8 @@
         retries: totalRetries
       };
 
-      const resendEfficiency = totalSize > 0 ? Number((bytesResent / totalSize).toFixed(4)) : 0;
+      const resendEfficiency =
+        totalSize > 0 ? Math.floor((bytesResent * 10000) / totalSize) / 10000 : 0;
 
       const summary = {
         uploadId,

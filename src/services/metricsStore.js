@@ -161,8 +161,10 @@ function createMetricsStore({ storageRoot, config }) {
       }
 
       const filePath = metricsPath(uploadId, storageRoot);
+      const monoOriginEpochMs = Date.now() - nowMonotonicMs();
       const payload = {
         uploadId: entry.uploadId,
+        monoOriginEpochMs,
         counters: { ...entry.counters },
         perIndexAttempts: { ...entry.perIndexAttempts },
         bytes: { ...entry.bytes },
@@ -411,16 +413,44 @@ function createMetricsStore({ storageRoot, config }) {
       const raw = await fs.promises.readFile(metricsFilePath, 'utf8');
       const loaded = JSON.parse(raw);
       if (loaded && loaded.uploadId === uploadId) {
+        const currentOrigin = Date.now() - nowMonotonicMs();
+        const storedOrigin =
+          typeof loaded.monoOriginEpochMs === 'number' ? loaded.monoOriginEpochMs : null;
+        const shift =
+          storedOrigin !== null && storedOrigin !== currentOrigin
+            ? storedOrigin - currentOrigin
+            : 0;
+
+        const mergedIntervals = (
+          Array.isArray(loaded.mergedIntervals) ? loaded.mergedIntervals : []
+        ).map((iv) => ({
+          startMs: iv.startMs + shift,
+          endMs: iv.endMs + shift
+        }));
+
+        const recentRecords = (
+          Array.isArray(loaded.recentRecords) ? loaded.recentRecords : []
+        ).map((rec) => ({
+          ...rec,
+          startMs: typeof rec.startMs === 'number' ? rec.startMs + shift : rec.startMs,
+          endMs: typeof rec.endMs === 'number' ? rec.endMs + shift : rec.endMs
+        }));
+
+        const firstStartMs =
+          typeof loaded.firstStartMs === 'number' ? loaded.firstStartMs + shift : null;
+        const lastEndMs =
+          typeof loaded.lastEndMs === 'number' ? loaded.lastEndMs + shift : null;
+
         const entry = {
           uploadId,
           counters: { ...loaded.counters },
           perIndexAttempts: { ...loaded.perIndexAttempts },
           bytes: { ...loaded.bytes },
-          mergedIntervals: Array.isArray(loaded.mergedIntervals) ? loaded.mergedIntervals : [],
-          recentRecords: Array.isArray(loaded.recentRecords) ? loaded.recentRecords : [],
+          mergedIntervals,
+          recentRecords,
           chunkDurationsMs: Array.isArray(loaded.chunkDurationsMs) ? loaded.chunkDurationsMs : [],
-          firstStartMs: typeof loaded.firstStartMs === 'number' ? loaded.firstStartMs : null,
-          lastEndMs: typeof loaded.lastEndMs === 'number' ? loaded.lastEndMs : null,
+          firstStartMs,
+          lastEndMs,
           firstAttemptAt: loaded.firstAttemptAt || null,
           lastCommitAt: loaded.lastCommitAt || null,
           finalize: loaded.finalize || null,
@@ -712,6 +742,7 @@ function createMetricsStore({ storageRoot, config }) {
   }
 
   return {
+    nowMonotonicMs,
     recordChunkAttempt,
     recordFinalize,
     recordFinalizeFailure,

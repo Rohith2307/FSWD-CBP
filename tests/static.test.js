@@ -106,10 +106,14 @@ test('Static Asset Serving (Checkpoint 6B)', async (t) => {
     }
   });
 
-  await t.test('GET /favicon.ico returns 204 No Content with no body', async () => {
+  await t.test('GET /favicon.ico returns 204 No Content without Content-Type or Content-Length', async () => {
     const res = await makeRequest(port, { method: 'GET', path: '/favicon.ico' });
     assert.equal(res.statusCode, 204);
     assert.equal(res.raw, '');
+    assert.equal(res.headers['content-type'], undefined);
+    assert.equal(res.headers['content-length'], undefined);
+    assert.equal(res.headers['x-content-type-options'], 'nosniff');
+    assert.equal(res.headers['cache-control'], 'no-cache');
   });
 
   await t.test('HEAD request returns headers but empty body', async () => {
@@ -207,7 +211,12 @@ test('Static Asset Serving (Checkpoint 6B)', async (t) => {
     assert.equal(/\bstyle\s*=/i.test(htmlContent), false, 'index.html must not contain style= attributes');
 
     // No inline event handler attributes like onclick=, onload=, onerror=
-    assert.equal(/\s+on[a-z]+\s*=/i.test(htmlContent), false, 'index.html must not contain inline event handlers');
+    const tagRegex = /<[a-z0-9-]+(\s+[^>]*)>/gi;
+    let tagMatch;
+    while ((tagMatch = tagRegex.exec(htmlContent)) !== null) {
+      const tagAttrs = tagMatch[1];
+      assert.equal(/\son[a-z]+\s*=/i.test(tagAttrs), false, `Tag contains inline event handler: ${tagMatch[0]}`);
+    }
 
     // No external http(s):// links
     assert.equal(/https?:\/\//i.test(htmlContent), false, 'index.html must not contain external URLs');

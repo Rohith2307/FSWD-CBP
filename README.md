@@ -622,6 +622,36 @@ Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'
 
 ---
 
+## Cleanup Policy (Checkpoint 7A)
+
+The service includes an automated background cleanup worker and standalone CLI (`node scripts/cleanup.js`) to reclaim disk space from abandoned uploads and temporary transfer files while preserving ledger audit history.
+
+### TTL Configuration Settings
+| Config Option | Environment Variable | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `sessionTtlMs` | `SESSION_TTL_MS` | `86400000` (24 h) | Inactivity expiration timeout for `created` and `uploading` sessions, measured from newest of `createdAt`, last chunk `committedAt`, or `finalizeStartedAt`. |
+| `tempFileTtlMs` | `TEMP_FILE_TTL_MS` | `3600000` (1 h) | Age threshold for unlinking orphaned files in `storage/temp`, excluding active assembly files. |
+| `orphanGraceMs` | `ORPHAN_GRACE_MS` | `3600000` (1 h) | Safety grace window protecting unreferenced chunk or media files from race conditions during active writes. |
+| `cleanupIntervalMs` | `CLEANUP_INTERVAL_MS` | `600000` (10 min) | Periodic timer interval for server-managed background cleanup sweeps. |
+
+### Session Expiration Protocol (`SESSION_EXPIRED`)
+- When an upload session exceeds `sessionTtlMs` without activity, the cleanup worker transitions its state to `"expired"` (`expiredAt` timestamp recorded).
+- Underlying chunk files (`storage/uploads/<id>/chunks/*`) and temporary part files are unlinked to free physical storage.
+- Authoritative session metadata (`metadata.json`) and telemetry (`metrics.json`) are permanently preserved for accounting and diagnostics.
+- Any subsequent `PUT` chunk request or `POST` finalize request on an expired session is rejected with HTTP `409 Conflict` and error code `SESSION_EXPIRED`:
+  ```json
+  {
+    "error": {
+      "code": "SESSION_EXPIRED",
+      "message": "Upload session \"<id>\" has expired",
+      "details": null
+    }
+  }
+  ```
+- The status query `GET /api/uploads/<id>` remains accessible, returning HTTP `200 OK` with `"state": "expired"`.
+
+---
+
 ## Known Limitations & Design Decisions
 
 - **Process-Local Metrics State**: The metrics store maintains an in-memory LRU cache (capped at 200 sessions) and a rolling window of recent chunk transfers. Periodic debounced writes persist state to `storage/uploads/<id>/metrics.json`. In a multi-process cluster, disk metrics are shared after persistence, but in-memory rolling windows and active interval mergers are isolated to each worker process.

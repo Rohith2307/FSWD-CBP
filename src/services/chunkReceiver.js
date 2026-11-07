@@ -30,6 +30,12 @@ const {
 async function receiveChunk(req, { uploadId, index, storageRoot, config }) {
   // 1. Verify upload session exists
   const metadata = await getUploadOrThrow(uploadId, storageRoot);
+  if (metadata.state === 'expired') {
+    req.resume();
+    const err = conflict(`Upload session "${uploadId}" has expired`);
+    err.code = 'SESSION_EXPIRED';
+    throw err;
+  }
   if (metadata.state !== 'created' && metadata.state !== 'uploading') {
     req.resume();
     throw conflict(`Cannot upload chunk: session "${uploadId}" is in state "${metadata.state}"`);
@@ -50,6 +56,19 @@ async function receiveChunk(req, { uploadId, index, storageRoot, config }) {
   let contentRange;
   let expectedSha256;
   try {
+    const rawContentLength = req.headers['content-length'];
+    if (!rawContentLength || !/^\d+$/.test(rawContentLength)) {
+      throw badRequest('Missing or invalid Content-Length header');
+    }
+    const contentLength = Number(rawContentLength);
+    if (contentLength > config.maxChunkBytes) {
+      throw payloadTooLarge(
+        `Chunk length (${contentLength}) exceeds maximum limit (${config.maxChunkBytes})`,
+        null,
+        { Connection: 'close' }
+      );
+    }
+
     contentRange = parseContentRange(req.headers['content-range']);
     expectedSha256 = parseSha256Header(req.headers['x-chunk-sha256']);
 
@@ -67,22 +86,9 @@ async function receiveChunk(req, { uploadId, index, storageRoot, config }) {
       );
     }
 
-    const rawContentLength = req.headers['content-length'];
-    if (!rawContentLength || !/^\d+$/.test(rawContentLength)) {
-      throw badRequest('Missing or invalid Content-Length header');
-    }
-    const contentLength = Number(rawContentLength);
     if (contentLength !== contentRange.length) {
       throw unprocessable(
         `Content-Length (${contentLength}) does not match declared byte range length (${contentRange.length})`
-      );
-    }
-
-    if (contentRange.length > config.maxChunkBytes) {
-      throw payloadTooLarge(
-        `Chunk length (${contentRange.length}) exceeds maximum limit (${config.maxChunkBytes})`,
-        null,
-        { Connection: 'close' }
       );
     }
   } catch (headerErr) {
@@ -143,7 +149,8 @@ async function receiveChunk(req, { uploadId, index, storageRoot, config }) {
   const tempPath = path.join(paths.tempDir(storageRoot), tempFilename);
 
   const hashTransform = createSha256Transform(declaredLength);
-  const fileWriteStream = fs.createWriteStream(tempPath, { flags: 'wx' });
+  const writeStreamFactory = (config && config._createWriteStream) || fs.createWriteStream;
+  const fileWriteStream = writeStreamFactory(tempPath, { flags: 'wx' });
 
   try {
     await pipeline(req, hashTransform, fileWriteStream);
@@ -211,6 +218,12 @@ async function receiveChunk(req, { uploadId, index, storageRoot, config }) {
       }
 
       // (a) State check with fresh draft
+      if (draft.state === 'expired') {
+        await fs.promises.unlink(tempPath).catch(() => {});
+        const err = conflict(`Upload session "${uploadId}" has expired`);
+        err.code = 'SESSION_EXPIRED';
+        throw err;
+      }
       if (draft.state !== 'created' && draft.state !== 'uploading') {
         await fs.promises.unlink(tempPath).catch(() => {});
         throw conflict(`Cannot commit chunk: upload is in state "${draft.state}"`);

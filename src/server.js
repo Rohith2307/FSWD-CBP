@@ -7,6 +7,7 @@ const { registerMediaRoutes } = require('./routes/media');
 const { registerMetricsRoutes } = require('./routes/metrics');
 const { registerStaticRoutes } = require('./routes/static');
 const { createMetricsStore } = require('./services/metricsStore');
+const { runCleanup } = require('./services/cleanup');
 const { sendJson, sendError } = require('./utils/http');
 const {
   badRequest,
@@ -159,7 +160,45 @@ function createServer(overrideConfig = {}) {
     publicDir
   });
 
+  const enableCleanup = overrideConfig.cleanup !== false;
+  let cleanupTimer = null;
+
+  let inFlightRequests = 0;
+  const inFlightDoneListeners = new Set();
+
+  const notifyInFlightDone = () => {
+    if (inFlightRequests === 0) {
+      for (const listener of inFlightDoneListeners) {
+        try {
+          listener();
+        } catch {}
+      }
+    }
+  };
+
   const server = http.createServer(async (req, res) => {
+    inFlightRequests++;
+    let requestCounted = true;
+    const decrementInFlight = () => {
+      if (requestCounted) {
+        requestCounted = false;
+        inFlightRequests--;
+        notifyInFlightDone();
+      }
+    };
+
+    res.once('finish', decrementInFlight);
+    res.once('close', decrementInFlight);
+
+    if (activeConfig.requestTimeoutMs > 0) {
+      req.setTimeout(activeConfig.requestTimeoutMs, () => {
+        req.destroy();
+        if (!res.destroyed) {
+          res.destroy();
+        }
+      });
+    }
+
     const startNs = process.hrtime.bigint();
     let parsedUrl = null;
     let logged = false;
@@ -244,6 +283,26 @@ function createServer(overrideConfig = {}) {
     // Ensure runtime storage directories exist before opening network port
     await ensureStorageDirs(activeConfig.storageRoot);
 
+    if (enableCleanup) {
+      // Run initial sweep asynchronously without delaying listen
+      runCleanup({
+        storageRoot: activeConfig.storageRoot,
+        config: activeConfig
+      }).catch((err) => {
+        console.error('[Cleanup] Startup sweep error:', err.message);
+      });
+
+      cleanupTimer = setInterval(() => {
+        runCleanup({
+          storageRoot: activeConfig.storageRoot,
+          config: activeConfig
+        }).catch((err) => {
+          console.error('[Cleanup] Periodic sweep error:', err.message);
+        });
+      }, activeConfig.cleanupIntervalMs);
+      cleanupTimer.unref();
+    }
+
     return new Promise((resolve, reject) => {
       server.listen(port, host, () => {
         listening = true;
@@ -254,19 +313,69 @@ function createServer(overrideConfig = {}) {
   }
 
   async function stop() {
-    await metricsStore.flushAll();
-    return new Promise((resolve) => {
-      if (!listening) {
-        return resolve();
+    if (cleanupTimer) {
+      clearInterval(cleanupTimer);
+      cleanupTimer = null;
+    }
+
+    if (!listening) {
+      if (cleanupTimer) {
+        clearInterval(cleanupTimer);
+        cleanupTimer = null;
       }
-      if (typeof server.closeIdleConnections === 'function') {
-        server.closeIdleConnections();
-      }
+      return;
+    }
+
+    // Stop accepting new connections
+    const closePromise = new Promise((resolve) => {
       server.close(() => {
         listening = false;
         resolve();
       });
     });
+
+    // Close any existing idle keep-alive connections immediately
+    if (typeof server.closeIdleConnections === 'function') {
+      server.closeIdleConnections();
+    }
+
+    // Wait up to 5s for in-flight requests to complete
+    if (inFlightRequests > 0) {
+      await new Promise((resolve) => {
+        const timeout = setTimeout(resolve, 5000);
+        timeout.unref();
+        const checkDone = () => {
+          if (inFlightRequests === 0) {
+            clearTimeout(timeout);
+            inFlightDoneListeners.delete(checkDone);
+            resolve();
+          }
+        };
+        inFlightDoneListeners.add(checkDone);
+      });
+    }
+
+    // Flush metrics
+    await metricsStore.flushAll();
+
+    // Close idle keep-alive connections
+    if (typeof server.closeIdleConnections === 'function') {
+      server.closeIdleConnections();
+    }
+
+    // Guarantee resolution if lingering sockets exist
+    await Promise.race([
+      closePromise,
+      new Promise((resolve) => {
+        const t = setTimeout(() => {
+          if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+          }
+          resolve();
+        }, 1000);
+        t.unref();
+      })
+    ]);
   }
 
   return {

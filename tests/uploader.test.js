@@ -316,4 +316,40 @@ test('uploader: Resumable client integration tests (Checkpoint 6B)', async (t) =
     assert.ok(maxInFlightPuts <= 4, `maxInFlightPuts was ${maxInFlightPuts}, must be <= 4`);
     assert.ok(maxAliveBuffers <= 4, `maxAliveBuffers was ${maxAliveBuffers}, must be <= 4`);
   });
+
+  await t.test('A4: maxRetries 2 on continuous 503 results in exactly 3 PUT attempts and retries === 2', async () => {
+    const smallBuffer = createSeededBuffer(65536, 777);
+    const blob = new Blob([smallBuffer]);
+
+    let putAttempts = 0;
+    const always503Fetch = async (url, opts) => {
+      if (opts?.method === 'PUT') {
+        putAttempts++;
+        return new Response(JSON.stringify({ error: { code: 'SERVICE_UNAVAILABLE', message: 'Busy' } }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      return globalThis.fetch(url, opts);
+    };
+
+    const uploader = createUploader({ baseUrl, fetch: always503Fetch, sleep: () => Promise.resolve() });
+    let threw = false;
+    let failedSummary = null;
+
+    try {
+      await uploader.upload(blob, {
+        name: 'exhaust-retries.bin',
+        chunkSize: 65536,
+        maxRetries: 2
+      });
+    } catch (err) {
+      threw = true;
+      failedSummary = err.summary;
+    }
+
+    assert.ok(threw, 'Upload must throw when retries are exhausted');
+    assert.equal(putAttempts, 3, 'Exactly 3 PUT attempts should occur for initial try + 2 retries');
+    assert.equal(failedSummary?.retries, 2, 'Summary retries must be exactly 2 (not double-counted)');
+  });
 });

@@ -50,18 +50,7 @@ function registerStaticRoutes(router, { publicDir }) {
   for (const [urlPath, item] of Object.entries(STATIC_ALLOW_LIST)) {
     if (item.favicon) {
       router.register('GET', urlPath, (req, res) => {
-        if (req.method === 'HEAD') {
-          res.writeHead(204, {
-            'Content-Type': 'image/x-icon',
-            'Content-Length': 0,
-            'X-Content-Type-Options': 'nosniff',
-            'Cache-Control': 'no-cache'
-          });
-          return res.end();
-        }
         res.writeHead(204, {
-          'Content-Type': 'image/x-icon',
-          'Content-Length': 0,
           'X-Content-Type-Options': 'nosniff',
           'Cache-Control': 'no-cache'
         });

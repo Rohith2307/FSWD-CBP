@@ -82,6 +82,12 @@ async function finalizeUpload(uploadId, { storageRoot, config, expectedSha256 })
     }
   }
 
+  if (metadata.state === 'expired') {
+    const err = conflict(`Upload session "${uploadId}" has expired`);
+    err.code = 'SESSION_EXPIRED';
+    throw err;
+  }
+
   // Active concurrency check
   if (metadata.state === 'finalizing') {
     if (activeFinalizations.has(uploadId)) {
@@ -140,6 +146,12 @@ async function finalizeUpload(uploadId, { storageRoot, config, expectedSha256 })
       if (draft.state === 'ready') {
         alreadyReadyMedia = draft.mediaId;
         return draft;
+      }
+
+      if (draft.state === 'expired') {
+        const err = conflict(`Upload session "${uploadId}" has expired`);
+        err.code = 'SESSION_EXPIRED';
+        throw err;
       }
 
       if (draft.state === 'finalizing' && activeFinalizations.has(uploadId)) {
@@ -410,7 +422,8 @@ async function finalizeUpload(uploadId, { storageRoot, config, expectedSha256 })
     finalMediaMetaPath = paths.mediaMetaPath(mediaId, storageRoot);
 
     try {
-      await fs.promises.rename(assemblyTempPath, finalMediaPath);
+      const renameFn = (config && config._rename) || fs.promises.rename;
+      await renameFn(assemblyTempPath, finalMediaPath);
       mediaRenamed = true;
       assemblyTempCreated = false;
     } catch (renameErr) {
@@ -538,5 +551,6 @@ async function finalizeUpload(uploadId, { storageRoot, config, expectedSha256 })
 
 module.exports = {
   finalizeUpload,
+  getActiveFinalizations: () => activeFinalizations,
   _activeFinalizations: activeFinalizations
 };

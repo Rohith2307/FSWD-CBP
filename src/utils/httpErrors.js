@@ -52,8 +52,16 @@ function unprocessable(message = 'Unprocessable Entity', details = null, headers
   return new HttpError(422, 'UNPROCESSABLE_ENTITY', message, details, headers);
 }
 
-function internal(message = 'Internal Server Error', details = null, headers = {}) {
-  return new HttpError(500, 'INTERNAL_SERVER_ERROR', message, details, headers);
+function internal(message = 'Internal Server Error', code = 'INTERNAL_SERVER_ERROR', details = null, headers = {}) {
+  if (typeof code === 'object' && code !== null) {
+    details = code;
+    code = 'INTERNAL_SERVER_ERROR';
+  }
+  return new HttpError(500, code, message, details, headers);
+}
+
+function insufficientStorage(message = 'Server storage is full', details = null, headers = {}) {
+  return new HttpError(507, 'INSUFFICIENT_STORAGE', message, details, headers);
 }
 
 module.exports = {
@@ -66,5 +74,6 @@ module.exports = {
   unsupportedMediaType,
   rangeNotSatisfiable,
   unprocessable,
-  internal
+  internal,
+  insufficientStorage
 };

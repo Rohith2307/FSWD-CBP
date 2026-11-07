@@ -58,9 +58,30 @@ function sendError(res, err) {
       }
     };
     sendJson(res, statusCode, body, err.headers || {});
+  } else if (err && (err.code === 'ENOSPC' || err.code === 'EDQUOT')) {
+    console.error(`[ServerError] Storage error: ${err.code}`);
+    sendJson(res, 507, {
+      error: {
+        code: 'INSUFFICIENT_STORAGE',
+        message: 'Server storage is full',
+        details: null
+      }
+    });
+  } else if (
+    err &&
+    (err.code === 'EACCES' || err.code === 'EPERM' || err.code === 'EROFS' || err.code === 'EIO')
+  ) {
+    console.error(`[ServerError] Filesystem error: ${err.code}`);
+    sendJson(res, 500, {
+      error: {
+        code: 'INTERNAL_SERVER_ERROR',
+        message: 'Internal Server Error',
+        details: null
+      }
+    });
   } else {
-    // Log unexpected errors server-side with full diagnostic info
-    console.error('[ServerError]', err);
+    // Log unexpected errors server-side with code or message only, never leaking filesystem paths
+    console.error('[ServerError]', err?.code ? `Error code: ${err.code}` : (err?.message || 'Unknown error'));
 
     const body = {
       error: {
