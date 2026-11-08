@@ -1,5 +1,6 @@
 # Runtime data storage
-storage/
+/storage/*
+!/storage/.gitkeep
 
 # Node dependencies (if any added in future)
 node_modules/
