@@ -5,7 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 const paths = require('../src/storage/paths');
-const { writeMetadata, readMetadata } = require('../src/storage/metadataStore');
+const { writeMetadata, readMetadata, updateMetadata } = require('../src/storage/metadataStore');
 const finalizer = require('../src/services/finalizer');
 const { runCleanup, sweepTemp, expireSessions, sweepOrphans } = require('../src/services/cleanup');
 const { createServer } = require('../src/server');
@@ -388,6 +388,76 @@ test('cleanup: Storage cleanup and session lifecycle service tests', async (t) =
     assert.equal(postMeta.state, 'uploading');
     assert.equal(fs.existsSync(chunk0), true, 'Existing chunk must not be deleted');
     assert.equal(fs.existsSync(chunk1), true, 'New chunk must not be deleted');
+  });
+
+  await t.test('expireSessions race: new chunk activity after initial check but before locked recheck -> session NOT expired', async () => {
+    const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fss-cleanup-race-activity-'));
+    let hookExecuted = false;
+    try {
+      await paths.ensureStorageDirs(testRoot);
+
+      const uploadId = '77777777-7777-4777-a777-777777777777';
+      const chunksDir = paths.chunksDir(uploadId, testRoot);
+      await fs.promises.mkdir(chunksDir, { recursive: true });
+
+      const chunk0Path = path.join(chunksDir, '000000.part');
+      const chunk0Data = Buffer.from('chunk zero binary data payload');
+      fs.writeFileSync(chunk0Path, chunk0Data);
+      const initialChunkSize = fs.statSync(chunk0Path).size;
+
+      const meta = {
+        uploadId,
+        originalName: 'race-activity-test.bin',
+        safeStoredName: `${uploadId}.bin`,
+        expectedSize: 2000,
+        contentType: 'application/octet-stream',
+        chunkSize: 1000,
+        totalChunks: 2,
+        createdAt: new Date(nowBase - 10000 * 1000).toISOString(),
+        state: 'uploading',
+        chunks: [
+          {
+            index: 0,
+            start: 0,
+            end: 999,
+            size: 1000,
+            checksum: '1111',
+            committedAt: new Date(nowBase - 10000 * 1000).toISOString()
+          }
+        ]
+      };
+      await writeMetadata(uploadId, meta, testRoot);
+
+      const res = await expireSessions({
+        storageRoot: testRoot,
+        sessionTtlMs: 3600 * 1000,
+        nowMs: nowBase,
+        dryRun: false,
+        _beforeExpireHook: async ({ uploadId: uid }) => {
+          hookExecuted = true;
+          await updateMetadata(uid, testRoot, (draft) => {
+            draft.chunks[0].committedAt = new Date(nowBase - 1000).toISOString();
+            return draft;
+          });
+        }
+      });
+
+      assert.equal(hookExecuted, true, '_beforeExpireHook must have been invoked');
+      assert.equal(res.sessionsExpired, 0, 'sessionsExpired must be 0');
+
+      const rawMeta = fs.readFileSync(paths.metadataPath(uploadId, testRoot), 'utf8');
+      const parsedMeta = JSON.parse(rawMeta);
+      assert.equal(parsedMeta.state, 'uploading', 'Session state must remain uploading');
+      assert.equal(parsedMeta.expiredAt, undefined, 'expiredAt field must not exist');
+      assert.equal(fs.existsSync(chunk0Path), true, 'Chunk file must still exist on disk');
+      assert.equal(fs.statSync(chunk0Path).size, initialChunkSize, 'Chunk file size must be unchanged');
+      assert.equal(Array.isArray(parsedMeta.chunks), true, 'Ledger chunks array must be intact');
+      assert.equal(parsedMeta.chunks.length, 1, 'Ledger must keep chunk record');
+      assert.equal(parsedMeta.chunks[0].index, 0);
+      assert.equal(parsedMeta.chunks[0].committedAt, new Date(nowBase - 1000).toISOString());
+    } finally {
+      fs.rmSync(testRoot, { recursive: true, force: true });
+    }
   });
 
   await t.test('sweepOrphans: orphan media file deleted, media with JSON kept, missing media file reported in orphanMediaJson', async () => {
